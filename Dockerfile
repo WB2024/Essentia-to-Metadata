@@ -31,7 +31,7 @@ RUN uv pip install --system --no-cache mutagen numpy
 # Download ML models at build time
 COPY download_models.sh .
 ENV HOME=/app
-RUN bash download_models.sh
+RUN sed -i 's/\r$//' download_models.sh && bash download_models.sh
 
 # Copy application code
 COPY tag_music.py .
