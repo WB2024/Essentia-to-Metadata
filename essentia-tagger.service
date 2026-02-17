@@ -1,0 +1,41 @@
+[Unit]
+Description=Essentia Music Tagger - File Watcher Service
+Documentation=https://github.com/your-repo/essentia-to-metadata
+After=network.target local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Working directory
+WorkingDirectory=/opt/essentia-tagger
+
+# Environment variables - customize these for your setup
+Environment="WATCH_DIR=/srv/dev-disk-by-uuid-dc4918d5-6597-465b-9567-ce442fbd8e2a/Media/Audio/Music/Sources/Clean"
+Environment="TAGGER_SCRIPT=/opt/essentia-tagger/tag_music.py"
+Environment="VENV_PATH=/opt/essentia-tagger/venv"
+Environment="MODEL_DIR=/opt/essentia-tagger/models"
+Environment="LOG_DIR=/var/log/essentia-tagger"
+Environment="DEBOUNCE_SECONDS=5"
+Environment="GENRES=3"
+Environment="GENRE_THRESHOLD=15"
+Environment="MOOD_THRESHOLD=0.5"
+Environment="GENRE_FORMAT=parent_child"
+Environment="DRY_RUN=false"
+Environment="OVERWRITE=true"
+
+# The watcher script
+ExecStart=/opt/essentia-tagger/essentia_watcher.sh
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=essentia-tagger
+
+[Install]
+WantedBy=multi-user.target
