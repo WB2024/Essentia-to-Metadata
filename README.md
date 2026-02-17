@@ -1,3 +1,5 @@
+# [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support-yellow?logo=buy-me-a-coffee)](https://buymeacoffee.com/succinctrecords)
+
 # 🎸 Essentia Music Tagger
 
 **Intelligent audio analysis and automatic genre/mood tagging for your music library**
