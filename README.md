@@ -121,17 +121,17 @@ MUSIC_DIR=/path/to/music docker compose run --rm essentia-tagger /music/song.fla
 
 ### GPU mode (NVIDIA)
 
-Requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed on the host.
+Requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed on the host. Uses a dedicated `Dockerfile.gpu` based on `nvidia/cuda` with CUDA 11.2 + cuDNN 8 for actual GPU acceleration.
 
 ```bash
-# Build the image
+# Build the GPU image
 docker compose build essentia-tagger-gpu
 
 # Process with GPU acceleration
 MUSIC_DIR=/path/to/music docker compose run --rm essentia-tagger-gpu
 ```
 
-If no GPU is available on the host, use the CPU profile instead. TensorFlow inside the container will automatically use the GPU when one is detected, and fall back to CPU otherwise.
+If no GPU is available on the host, use the CPU profile instead.
 
 ---
 

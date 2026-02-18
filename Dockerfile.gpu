@@ -1,0 +1,56 @@
+FROM nvidia/cuda:11.2.2-cudnn8-runtime-ubuntu20.04
+
+# Avoid interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python 3.10 and system dependencies required by Essentia
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.10 \
+        python3.10-venv \
+        python3.10-dev \
+        build-essential \
+        libfftw3-dev \
+        libavcodec-dev \
+        libavformat-dev \
+        libavutil-dev \
+        libswresample-dev \
+        libsamplerate0-dev \
+        libtag1-dev \
+        libchromaprint-dev \
+        libyaml-dev \
+        wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make python3.10 the default python
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 \
+    && python -m ensurepip --upgrade
+
+WORKDIR /app
+
+# Install uv for fast dependency management
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Install Python dependencies
+RUN uv pip install --system --no-cache essentia-tensorflow
+COPY requirements.txt .
+RUN uv pip install --system --no-cache mutagen numpy
+
+# Download ML models at build time
+COPY download_models.sh .
+ENV HOME=/app
+RUN sed -i 's/\r$//' download_models.sh && bash download_models.sh
+
+# Copy application code
+COPY tag_music.py docker-entrypoint.py ./
+
+# Suppress noisy TensorFlow logs (INFO + WARNING)
+ENV TF_CPP_MIN_LOG_LEVEL=3
+
+# Music directory mount point
+VOLUME ["/music"]
+
+ENTRYPOINT ["python", "docker-entrypoint.py", "--model-dir", "/app/essentia_models"]
+CMD ["/music", "--auto"]

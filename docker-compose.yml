@@ -10,9 +10,13 @@ services:
     profiles: ["cpu"]
 
   essentia-tagger-gpu:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
     volumes:
       - ${MUSIC_DIR:-./music}:/music
+    networks:
+      - essentia_net
     deploy:
       resources:
         reservations:
@@ -21,3 +25,7 @@ services:
               count: all
               capabilities: [gpu]
     profiles: ["gpu"]
+
+networks:
+  essentia_net:
+    driver: bridge
