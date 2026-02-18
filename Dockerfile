@@ -34,7 +34,7 @@ ENV HOME=/app
 RUN sed -i 's/\r$//' download_models.sh && bash download_models.sh
 
 # Copy application code
-COPY tag_music.py .
+COPY tag_music.py docker-entrypoint.py ./
 
 # Suppress noisy TensorFlow logs (INFO + WARNING)
 ENV TF_CPP_MIN_LOG_LEVEL=3
@@ -42,5 +42,5 @@ ENV TF_CPP_MIN_LOG_LEVEL=3
 # Music directory mount point
 VOLUME ["/music"]
 
-ENTRYPOINT ["python", "tag_music.py", "--model-dir", "/app/essentia_models"]
+ENTRYPOINT ["python", "docker-entrypoint.py", "--model-dir", "/app/essentia_models"]
 CMD ["/music", "--auto"]
