@@ -24,6 +24,7 @@ Analyze your music collection using machine learning and write accurate genre an
 - 💾 **FLAC & MP3 support** - Writes to standard tag formats
 - 🧪 **Dry run mode** - Test before making changes
 - 🚀 **CPU-only** - No GPU required (though it helps!)
+- 🐳 **Docker support** - Run with Docker, with optional GPU acceleration
 - 🤖 **Automation support** - CLI arguments for scripted/automated workflows
 - 🔄 **Picard integration** - Auto-tag files saved by MusicBrainz Picard.
 
@@ -100,6 +101,40 @@ You'll be prompted for:
 **Recommendation:** Run in dry-run mode first to preview results!
 
 ---
+## 🐳 Docker
+
+### CPU mode
+
+```bash
+# Build the image
+docker compose build essentia-tagger
+
+# Process a music directory
+MUSIC_DIR=/path/to/music docker compose run --rm essentia-tagger
+
+# Dry run
+MUSIC_DIR=/path/to/music docker compose run --rm essentia-tagger /music --auto --dry-run
+
+# Process a single file
+MUSIC_DIR=/path/to/music docker compose run --rm essentia-tagger /music/song.flac --auto --single-file
+```
+
+### GPU mode (NVIDIA)
+
+Requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed on the host. Uses a dedicated `Dockerfile.gpu` based on `nvidia/cuda` with CUDA 11.2 + cuDNN 8 for actual GPU acceleration.
+
+```bash
+# Build the GPU image
+docker compose build essentia-tagger-gpu
+
+# Process with GPU acceleration
+MUSIC_DIR=/path/to/music docker compose run --rm essentia-tagger-gpu
+```
+
+If no GPU is available on the host, use the CPU profile instead.
+
+---
+
 ## 🤖 Command Line / Automation Mode
 
 For scripting or integration with other tools, use CLI arguments:

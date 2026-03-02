@@ -1,0 +1,16 @@
+venv/
+env/
+__pycache__/
+*.pyc
+*.log
+.git/
+.github/
+.vscode/
+.idea/
+essentia_models/
+test/
+tmp/
+*.md
+LICENSE
+.gitignore
+.dockerignore

@@ -1,0 +1,49 @@
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python 3.10 (default on Ubuntu 22.04) and system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-dev \
+        build-essential \
+        libfftw3-dev \
+        libavcodec-dev \
+        libavformat-dev \
+        libavutil-dev \
+        libswresample-dev \
+        libsamplerate0-dev \
+        libtag1-dev \
+        libchromaprint-dev \
+        libyaml-dev \
+        wget \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install uv for fast dependency management
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Install Python dependencies
+RUN uv pip install --system --no-cache essentia-tensorflow
+COPY requirements.txt .
+RUN uv pip install --system --no-cache mutagen numpy
+
+# Download ML models at build time
+COPY download_models.sh .
+ENV HOME=/app
+RUN sed -i 's/\r$//' download_models.sh && bash download_models.sh
+
+# Copy application code
+COPY tag_music.py docker-entrypoint.py ./
+
+# Suppress noisy TensorFlow logs (INFO + WARNING)
+ENV TF_CPP_MIN_LOG_LEVEL=3
+
+# Music directory mount point
+VOLUME ["/music"]
+
+ENTRYPOINT ["python", "docker-entrypoint.py", "--model-dir", "/app/essentia_models"]
+CMD ["/music", "--auto"]
