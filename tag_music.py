@@ -9,6 +9,7 @@ import sys
 import argparse
 from pathlib import Path
 from datetime import datetime
+import platform
 import numpy as np
 from essentia.standard import MonoLoader, TensorflowPredictEffnetDiscogs, TensorflowPredict2D
 import mutagen
@@ -252,6 +253,30 @@ Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         self.file_handle.close()
 
 
+# Persistent settings file for storing default library path
+SETTINGS_FILE = os.path.expanduser('~/.essentia_tagger.json')
+
+
+def load_settings():
+    """Load persistent settings (default library path, etc.)"""
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {}
+
+
+def save_settings(settings):
+    """Save persistent settings to disk"""
+    try:
+        with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=2)
+    except IOError as e:
+        print(f"   \u26a0\ufe0f  Could not save settings: {e}")
+
+
 class Config:
     """Runtime configuration from user prompts"""
     def __init__(self):
@@ -266,6 +291,7 @@ class Config:
         self.verbose = True
         self.log_file = None
         self.genre_format = 'parent_child'
+        self.default_library_path = None
 
 
 class EssentiaAnalyzer:
@@ -794,15 +820,246 @@ def scan_library(root_path, analyzer, tag_writer, config, logger):
     logger.log_summary(processed, errors, skipped)
 
 
-def get_music_path():
-    """Prompt user for music directory path"""
+def _read_key():
+    """Read a single keypress, returning special keys as names.
+    Returns: str - single char or 'up', 'down', 'enter', 'backspace', 'q'
+    """
+    if platform.system() == 'Windows':
+        import msvcrt
+        ch = msvcrt.getwch()
+        if ch in ('\r', '\n'):
+            return 'enter'
+        if ch == '\x08' or ch == '\x7f':
+            return 'backspace'
+        if ch in ('\x00', '\xe0'):  # special key prefix on Windows
+            ch2 = msvcrt.getwch()
+            if ch2 == 'H':
+                return 'up'
+            if ch2 == 'P':
+                return 'down'
+            return None
+        return ch
+    else:
+        import tty
+        import termios
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            ch = sys.stdin.read(1)
+            if ch == '\r' or ch == '\n':
+                return 'enter'
+            if ch == '\x7f' or ch == '\x08':
+                return 'backspace'
+            if ch == '\x1b':  # escape sequence
+                ch2 = sys.stdin.read(1)
+                if ch2 == '[':
+                    ch3 = sys.stdin.read(1)
+                    if ch3 == 'A':
+                        return 'up'
+                    if ch3 == 'B':
+                        return 'down'
+                return None
+            return ch
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _clear_lines(n):
+    """Move cursor up n lines and clear them."""
+    for _ in range(n):
+        sys.stdout.write('\x1b[A')   # move up
+        sys.stdout.write('\x1b[2K')  # clear line
+    sys.stdout.flush()
+
+
+def browse_directory(start_path):
+    """Interactive directory browser with arrow-key navigation.
+    
+    Args:
+        start_path: Root directory to start browsing from
+    
+    Returns:
+        str - selected directory path, or None if cancelled
+    """
+    current_path = Path(start_path)
+    selected_idx = 0
+    page_size = 15
+    scroll_offset = 0
+    
+    while True:
+        # Get subdirectories of current path
+        try:
+            subdirs = sorted(
+                [d for d in current_path.iterdir() if d.is_dir()],
+                key=lambda d: d.name.lower()
+            )
+        except PermissionError:
+            print("\n   ⚠️  Permission denied. Going back...")
+            current_path = current_path.parent
+            selected_idx = 0
+            scroll_offset = 0
+            continue
+        
+        # Build menu items
+        items = []
+        items.append(('✅ SELECT THIS FOLDER', 'select'))
+        if current_path != Path(start_path):
+            items.append(('⬆️  ../ (go up)', 'up'))
+        for d in subdirs:
+            items.append((f"📁 {d.name}", str(d)))
+        
+        # Clamp selection
+        if selected_idx >= len(items):
+            selected_idx = len(items) - 1
+        if selected_idx < 0:
+            selected_idx = 0
+        
+        # Adjust scroll so selected item is visible
+        if selected_idx < scroll_offset:
+            scroll_offset = selected_idx
+        if selected_idx >= scroll_offset + page_size:
+            scroll_offset = selected_idx - page_size + 1
+        
+        visible_items = items[scroll_offset:scroll_offset + page_size]
+        
+        # Render
+        lines = []
+        rel_path = str(current_path)
+        try:
+            rel_path = str(current_path.relative_to(start_path))
+            if rel_path == '.':
+                rel_path = '(library root)'
+            else:
+                rel_path = f"/{rel_path}"
+        except ValueError:
+            pass
+        
+        lines.append(f"\n   📂 Browsing: {rel_path}")
+        lines.append(f"   📍 Full path: {current_path}")
+        lines.append("   Use ↑↓ arrows to navigate, Enter to select, 'q' to cancel")
+        lines.append("   " + "─" * 50)
+        
+        for i, (label, _action) in enumerate(visible_items):
+            global_idx = i + scroll_offset
+            if global_idx == selected_idx:
+                lines.append(f"   ▶ {label}")
+            else:
+                lines.append(f"     {label}")
+        
+        if scroll_offset > 0:
+            lines.append(f"   ↑ ({scroll_offset} more above)")
+        remaining_below = len(items) - scroll_offset - page_size
+        if remaining_below > 0:
+            lines.append(f"   ↓ ({remaining_below} more below)")
+        
+        lines.append("")
+        
+        output = '\n'.join(lines)
+        sys.stdout.write(output)
+        sys.stdout.flush()
+        
+        # Read key
+        key = _read_key()
+        
+        # Clear the rendered block before re-rendering
+        line_count = len(lines)
+        _clear_lines(line_count)
+        
+        if key == 'up':
+            if selected_idx > 0:
+                selected_idx -= 1
+        elif key == 'down':
+            if selected_idx < len(items) - 1:
+                selected_idx += 1
+        elif key == 'enter':
+            _label, action = items[selected_idx]
+            if action == 'select':
+                return str(current_path)
+            elif action == 'up':
+                current_path = current_path.parent
+                selected_idx = 0
+                scroll_offset = 0
+            else:
+                # Navigate into subfolder
+                current_path = Path(action)
+                selected_idx = 0
+                scroll_offset = 0
+        elif key == 'q':
+            return None
+        elif key == 'backspace':
+            if current_path != Path(start_path):
+                current_path = current_path.parent
+                selected_idx = 0
+                scroll_offset = 0
+
+
+def get_music_path(config):
+    """Prompt user for music directory path, with optional library browsing"""
     print("\n" + "=" * 70)
     print("🎸 ESSENTIA MUSIC TAGGER - INTERACTIVE MODE")
     print("=" * 70)
     print("\nThis tool will recursively analyze ALL audio files")
     print("in the directory you specify and its subdirectories.\n")
     
-    # Show some example paths to help user
+    library_path = config.default_library_path
+    
+    if library_path and os.path.isdir(library_path):
+        print(f"📚 Default library: {library_path}")
+        print()
+        print("How would you like to choose the scan path?")
+        print("   1 = Scan entire library (default)")
+        print("   2 = Browse & select a folder within library")
+        print("   3 = Enter a custom path")
+        print()
+        
+        while True:
+            choice = input("Select option [1]: ").strip()
+            if choice in ('', '1'):
+                # Scan entire library
+                path = Path(library_path)
+                sample_files = list(path.rglob('*'))
+                audio_count = len([f for f in sample_files if f.suffix.lower() in AUDIO_EXTENSIONS])
+                print(f"\n📂 Directory: {path}")
+                print(f"🎵 Found ~{audio_count} audio files")
+                confirm = input("\nProceed with this directory? [Y/n]: ").strip().lower()
+                if confirm in ('', 'y', 'yes'):
+                    return str(path)
+                else:
+                    print("Cancelled.\n")
+                    continue
+            
+            elif choice == '2':
+                # Browse library
+                print("\n📂 Opening folder browser...")
+                selected = browse_directory(library_path)
+                if selected:
+                    path = Path(selected)
+                    sample_files = list(path.rglob('*'))
+                    audio_count = len([f for f in sample_files if f.suffix.lower() in AUDIO_EXTENSIONS])
+                    print(f"\n📂 Selected: {path}")
+                    print(f"🎵 Found ~{audio_count} audio files")
+                    confirm = input("\nProceed with this directory? [Y/n]: ").strip().lower()
+                    if confirm in ('', 'y', 'yes'):
+                        return str(path)
+                    else:
+                        print("Cancelled. Let's try again.\n")
+                        continue
+                else:
+                    print("\nBrowsing cancelled. Let's try again.\n")
+                    continue
+            
+            elif choice == '3':
+                break  # Fall through to manual path entry
+            
+            else:
+                print("   ⚠️  Please enter 1, 2, or 3")
+    else:
+        if library_path:
+            print(f"⚠️  Default library path no longer exists: {library_path}")
+            print()
+    
+    # Manual path entry (original flow)
     print("Example paths:")
     print("  • /srv/.../Music/Sources/Clean/2Pac")
     print("  • /srv/.../Music/Sources/Clean/2Pac/Me Against the World")
@@ -895,13 +1152,57 @@ def configure_settings():
     """Interactive configuration"""
     config = Config()
     
+    # Load saved settings
+    saved = load_settings()
+    config.default_library_path = saved.get('default_library_path')
+    
     print("\n" + "=" * 70)
     print("⚙️  CONFIGURATION")
     print("=" * 70)
     print("\nPress Enter to accept defaults shown in [brackets]\n")
     
-    # Dry run mode
+    # Default library path
     print("─" * 70)
+    print("📚 DEFAULT LIBRARY PATH")
+    print("   Set a default path to your music library for quick access")
+    print("   This will be saved between runs")
+    if config.default_library_path:
+        print(f"   Current: {config.default_library_path}")
+        print("   • 1 = Keep current (default)")
+        print("   • 2 = Change path")
+        print("   • 3 = Clear (remove default)")
+        lib_choice = get_int_input("Library path", default=1, min_val=1, max_val=3)
+        if lib_choice == 2:
+            new_path = input("   Enter new library path: ").strip().strip('\'"')
+            new_path = os.path.expanduser(new_path)
+            if os.path.isdir(new_path):
+                config.default_library_path = new_path
+                saved['default_library_path'] = new_path
+                save_settings(saved)
+                print(f"   ✅ Library path saved: {new_path}")
+            else:
+                print(f"   ❌ Path does not exist: {new_path}")
+                print("   Keeping previous setting.")
+        elif lib_choice == 3:
+            config.default_library_path = None
+            saved.pop('default_library_path', None)
+            save_settings(saved)
+            print("   ✅ Library path cleared")
+    else:
+        set_lib = get_yes_no("Set a default library path?", default=False)
+        if set_lib:
+            new_path = input("   Enter library path: ").strip().strip('\'"')
+            new_path = os.path.expanduser(new_path)
+            if os.path.isdir(new_path):
+                config.default_library_path = new_path
+                saved['default_library_path'] = new_path
+                save_settings(saved)
+                print(f"   ✅ Library path saved: {new_path}")
+            else:
+                print(f"   ❌ Path does not exist: {new_path}")
+    
+    # Dry run mode
+    print("\n" + "─" * 70)
     print("🧪 DRY RUN MODE")
     print("   Test mode - analyzes files but doesn't write tags")
     print("   Recommended: Enable for first run to see results")
@@ -1000,6 +1301,8 @@ def display_config_summary(config, music_path):
     print("=" * 70)
     print(f"📂 Target directory: {music_path}")
     print(f"📁 Model directory: {MODEL_DIR}")
+    if config.default_library_path:
+        print(f"📚 Default library: {config.default_library_path}")
     
     if config.enable_genres and config.enable_moods:
         print(f"\n🎯 Analysis mode: Genres & Moods")
@@ -1183,6 +1486,14 @@ Genre format styles:
         help='Directory containing Essentia models (default: ~/essentia_models)'
     )
     
+    parser.add_argument(
+        '--library',
+        type=str,
+        default=None,
+        metavar='DIR',
+        help='Default music library path (saved for future runs)'
+    )
+    
     return parser.parse_args()
 
 
@@ -1204,6 +1515,15 @@ def config_from_args(args):
     config.overwrite_existing = args.overwrite
     config.verbose = not args.quiet
     config.genre_format = args.genre_format
+    
+    # Handle library path
+    if args.library:
+        lib_path = os.path.expanduser(args.library)
+        if os.path.isdir(lib_path):
+            saved = load_settings()
+            saved['default_library_path'] = lib_path
+            save_settings(saved)
+            config.default_library_path = lib_path
     
     # Set up log file
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1334,8 +1654,15 @@ def main():
     else:
         # Interactive mode (original behavior)
         try:
+            # Load saved settings for library path
+            saved = load_settings()
+            
+            # Create a temporary config to hold library path for get_music_path
+            temp_config = Config()
+            temp_config.default_library_path = saved.get('default_library_path')
+            
             # Get path from user
-            music_path = get_music_path()
+            music_path = get_music_path(temp_config)
             
             # Configure settings interactively
             config = configure_settings()
