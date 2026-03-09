@@ -17,11 +17,12 @@ Analyze your music collection using machine learning and write accurate genre an
 - 🎯 **Audio-based analysis** - Analyzes actual audio content, not metadata lookups
 - 🎼 **400 genre classifications** - Uses Discogs taxonomy for detailed genre tagging
 - 😊 **Mood detection** - Detects moods like energetic, dark, happy, aggressive, etc.
+- 🎚️ **Analysis mode selection** - Choose genres only, moods only, or both per run
 - 🔄 **Batch processing** - Recursively process entire music libraries
 - 🎛️ **Fully configurable** - Interactive prompts for all settings on each run
 - 📝 **Comprehensive logging** - Detailed logs with confidence scores and predictions
 - 🏷️ **Multiple tag formats** - Choose how genre tags are formatted
-- 💾 **FLAC & MP3 support** - Writes to standard tag formats
+- 💾 **Wide format support** - Writes tags to FLAC, MP3, OGG, Opus, M4A/MP4, AAC, WMA, AIFF, WAV, WavPack, APE, Musepack, and DSF
 - 🧪 **Dry run mode** - Test before making changes
 - 🚀 **CPU-only** - No GPU required (though it helps!)
 - 🐳 **Docker support** - Run with Docker, with optional GPU acceleration
@@ -167,6 +168,7 @@ python tag_music.py /path/to/music --auto --dry-run
 | `--genres N` | `-g` | Number of genres | 3 |
 | `--genre-threshold PCT` | `-gt` | Genre confidence % | 15 |
 | `--genre-format STYLE` | `-gf` | Format style | parent_child |
+| `--no-genres` | - | Disable genre analysis | - |
 | `--no-moods` | - | Disable mood analysis | - |
 | `--mood-threshold PCT` | `-mt` | Mood confidence % | 0.5 |
 | `--dry-run` | `-d` | Don't write tags | - |
@@ -174,6 +176,8 @@ python tag_music.py /path/to/music --auto --dry-run
 | `--quiet` | `-q` | Minimal output | - |
 | `--log-dir DIR` | - | Log file directory | ./ |
 | `--model-dir DIR` | - | Essentia models directory | ~/essentia_models |
+
+> **Note:** `--no-genres` and `--no-moods` cannot be used together — at least one analysis type must be enabled.
 
 ---
 
@@ -199,27 +203,38 @@ See **[PICARD_AUTOMATION_SETUP.md](PICARD_AUTOMATION_SETUP.md)** for complete se
 
 Every run prompts you to configure:
 
-#### Genre Settings
+#### Analysis Mode
 
-- **Number of genres** (1-10) - How many genre tags per song
-- **Confidence threshold** (1-50%) - Minimum prediction confidence
+Choose what to analyse for each run:
+
+| Option | Description |
+|--------|-------------|
+| **1. Both** (default) | Analyse and write both genre and mood tags |
+| **2. Genres only** | Run only the genre model; skip mood analysis entirely |
+| **3. Moods only** | Run only the mood model; skip genre analysis entirely |
+
+Only the models that are needed are loaded, saving memory and time when running in a single-mode.
+
+#### Genre Settings *(shown when mode is Both or Genres only)*
+
+- **Number of genres** (1-10) - How many genre tags per song
+- **Confidence threshold** (1-50%) - Minimum prediction confidence
 - **Format style**:
-  - `Rock - Alternative Rock` (parent - child) ← default
-  - `Alternative Rock - Rock` (child - parent)
-  - `Alternative Rock` (child only)
-  - `Rock---Alternative Rock` (raw)
+  - `Rock - Alternative Rock` (parent - child) ← default
+  - `Alternative Rock - Rock` (child - parent)
+  - `Alternative Rock` (child only)
+  - `Rock---Alternative Rock` (raw)
 
-#### Mood Settings
+#### Mood Settings *(shown when mode is Both or Moods only)*
 
-- **Enable/disable** mood analysis
-- **Confidence threshold** (0.1-20%) - Moods have lower confidence than genres
+- **Confidence threshold** (0.1-20%) - Moods have lower confidence than genres
 
 #### Other Options
 
-- **Dry run mode** - Test without writing tags
-- **Confidence tags** - Write detailed scores to custom tags
-- **Overwrite existing** - Skip or replace existing genre tags
-- **Verbose output** - Show detailed predictions
+- **Dry run mode** - Test without writing tags
+- **Confidence tags** - Write detailed scores to custom tags
+- **Overwrite existing** - Skip or replace existing genre/mood tags independently
+- **Verbose output** - Show detailed predictions
 
 ### Example Session
 
@@ -238,13 +253,18 @@ Enter the path to analyze: /music/2Pac
 🧪 DRY RUN MODE
 Enable dry run mode? [Y/n]: y
 
+�️ ANALYSIS MODE
+  1. Both genres and moods (default)
+  2. Genres only
+  3. Moods only
+Select mode [1]: 1
+
 🎸 GENRE SETTINGS
 Number of genres to write [3]: 3
 Genre threshold (%) [15]: 15
 Genre format [1]: 1
 
-😊 MOOD ANALYSIS
-Enable mood analysis? [Y/n]: y
+😊 MOOD SETTINGS
 Mood threshold (%) [0.5]: 0.5
 
 🔄 Loading models...
@@ -291,17 +311,37 @@ Understanding confidence scores:
 
 ### Tags Written
 
-**FLAC files:**
+Tags are written using the native tagging format for each container:
 
-- `GENRE` - Formatted genre tags (semicolon-separated)
-- `MOOD` - Formatted mood tags (semicolon-separated)
-- `ESSENTIA_GENRE` - Raw predictions with confidence scores (optional)
-- `ESSENTIA_MOOD` - Raw mood predictions with scores (optional)
+**FLAC / OGG Vorbis / OGG Opus** (Vorbis Comments):
 
-**MP3 files:**
+- `GENRE` - Formatted genre tags (semicolon-separated)
+- `MOOD` - Formatted mood tags (semicolon-separated)
+- `ESSENTIA_GENRE` - Raw predictions with confidence scores (optional)
+- `ESSENTIA_MOOD` - Raw mood predictions with scores (optional)
 
-- `TCON` (Genre) - Formatted genre tags
-- `COMM` (Comment) - Confidence scores (optional)
+**MP3 / AIFF / WAV / DSF** (ID3v2):
+
+- `TCON` (Genre) - Formatted genre tags
+- `COMM` (Comment) - Confidence scores (optional)
+
+**M4A / MP4 / AAC** (iTunes atoms):
+
+- `©gen` - Formatted genre tags
+- `©cmt` - Confidence scores (optional)
+- `----:com.apple.iTunes:MOOD` - Mood tags (freeform atom)
+
+**WMA** (ASF/Windows Media):
+
+- `WM/Genre` - Formatted genre tags
+- `WM/Mood` - Mood tags
+- `WM/Provider` - Confidence scores (optional)
+
+**WavPack / APE / Musepack** (APEv2):
+
+- `Genre` - Formatted genre tags
+- `Mood` - Mood tags
+- `Essentia Genre` / `Essentia Mood` - Confidence scores (optional)
 
 ### Log Files
 
@@ -416,12 +456,12 @@ Contributions welcome! Please:
 
 ### Ideas for contributions:
 
-- Support for more audio formats (ALAC, Opus, etc.)
 - GUI interface
 - Progress bars
 - Resume/checkpoint system for interrupted runs
 - Custom model support
 - Genre mapping/translation tables
+- ALAC (Apple Lossless) support
 
 ---
 
@@ -492,6 +532,31 @@ Use mood tags to create dynamic playlists (energetic workout mixes, relaxing eve
 
 ---
 
+## 📋 Changelog
+
+### v2.0.0 (Latest)
+
+#### New Features
+
+- **Analysis mode selection** — New 3-way mode menu in interactive mode lets you choose to run genres only, moods only, or both. The corresponding ML models are only loaded when needed, reducing memory usage when running in single-mode. CLI equivalents: `--no-genres` and `--no-moods`.
+- **Wide audio format support** — Tag writing now covers 12 audio container formats via native tag systems:
+  - Vorbis Comments: FLAC, OGG Vorbis, OGG Opus
+  - ID3v2: MP3, AIFF, WAV, DSF
+  - iTunes atoms: M4A, MP4, AAC
+  - ASF: WMA
+  - APEv2: WavPack (`.wv`), Monkey's Audio (`.ape`), Musepack (`.mpc`)
+- **Per-tag-type overwrite logic** — Genre and mood tags are now checked and potentially skipped independently. Previously, if a genre tag existed and overwrite was disabled the entire file was skipped, including moods.
+
+#### Bug Fixes
+
+- Fixed MP3 mood tags never being written when genres were disabled — mood writing was incorrectly nested inside the genres block.
+- Fixed bare `except:` clause in MP3 tag writing replaced with `except Exception:` to avoid swallowing system exits and keyboard interrupts.
+- Fixed `mood_threshold` config default mismatch — the internal default was `0.01` while the CLI help text advertised `0.5%` (0.005). Both are now consistently `0.005`.
+- Removed unused imports (`re`, `from mutagen.mp3 import MP3`).
+
+---
+
 **Made with ❤️ for music lovers and data nerds**
 
 *If this project helps you, consider ⭐ starring the repo!*
+
