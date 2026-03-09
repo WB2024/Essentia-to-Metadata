@@ -12,6 +12,8 @@ from datetime import datetime
 import platform
 import numpy as np
 from essentia.standard import MonoLoader, TensorflowPredictEffnetDiscogs, TensorflowPredict2D
+import essentia
+essentia.log.warningActive = False
 import mutagen
 from mutagen.flac import FLAC
 from mutagen.id3 import ID3, TCON, COMM
@@ -1035,6 +1037,7 @@ def get_music_path(config):
         print("   1 = Scan entire library (default)")
         print("   2 = Browse & select a folder within library")
         print("   3 = Enter a custom path")
+        print("   4 = Change/clear default library path")
         print()
         while True:
             choice = input("Select option [1]: ").strip()
@@ -1070,8 +1073,33 @@ def get_music_path(config):
                     continue
             elif choice == '3':
                 break  # Fall through to manual path entry
+            elif choice == '4':
+                print(f"\n   Current: {library_path}")
+                print("   c = Change path  |  x = Clear/remove  |  Enter = Cancel")
+                mgmt = input("   Action: ").strip().lower()
+                if mgmt == 'c':
+                    new_path = input("   New library path: ").strip().strip('\'\'"')
+                    new_path = os.path.expanduser(new_path)
+                    if os.path.isdir(new_path):
+                        s = load_settings()
+                        s['default_library_path'] = new_path
+                        save_settings(s)
+                        config.default_library_path = new_path
+                        library_path = new_path
+                        print(f"   ✅ Saved: {library_path}")
+                    else:
+                        print(f"   ❌ Does not exist: {new_path}")
+                elif mgmt == 'x':
+                    s = load_settings()
+                    s.pop('default_library_path', None)
+                    save_settings(s)
+                    config.default_library_path = None
+                    print("   ✅ Library path cleared")
+                    break  # Fall through to manual path entry
+                print()
+                continue
             else:
-                print("   ⚠️  Please enter 1, 2, or 3")
+                print("   ⚠️  Please enter 1, 2, 3, or 4")
     
     # Manual path entry (original flow)
     print("Example paths:")
@@ -1174,49 +1202,9 @@ def configure_settings():
     print("⚙️  CONFIGURATION")
     print("=" * 70)
     print("\nPress Enter to accept defaults shown in [brackets]\n")
-    
-    # Default library path
-    print("─" * 70)
-    print("📚 DEFAULT LIBRARY PATH")
-    print("   Set a default path to your music library for quick access")
-    print("   This will be saved between runs")
-    if config.default_library_path:
-        print(f"   Current: {config.default_library_path}")
-        print("   • 1 = Keep current (default)")
-        print("   • 2 = Change path")
-        print("   • 3 = Clear (remove default)")
-        lib_choice = get_int_input("Library path", default=1, min_val=1, max_val=3)
-        if lib_choice == 2:
-            new_path = input("   Enter new library path: ").strip().strip('\'"')
-            new_path = os.path.expanduser(new_path)
-            if os.path.isdir(new_path):
-                config.default_library_path = new_path
-                saved['default_library_path'] = new_path
-                save_settings(saved)
-                print(f"   ✅ Library path saved: {new_path}")
-            else:
-                print(f"   ❌ Path does not exist: {new_path}")
-                print("   Keeping previous setting.")
-        elif lib_choice == 3:
-            config.default_library_path = None
-            saved.pop('default_library_path', None)
-            save_settings(saved)
-            print("   ✅ Library path cleared")
-    else:
-        set_lib = get_yes_no("Set a default library path?", default=False)
-        if set_lib:
-            new_path = input("   Enter library path: ").strip().strip('\'"')
-            new_path = os.path.expanduser(new_path)
-            if os.path.isdir(new_path):
-                config.default_library_path = new_path
-                saved['default_library_path'] = new_path
-                save_settings(saved)
-                print(f"   ✅ Library path saved: {new_path}")
-            else:
-                print(f"   ❌ Path does not exist: {new_path}")
-    
+
     # Dry run mode
-    print("\n" + "─" * 70)
+    print("─" * 70)
     print("🧪 DRY RUN MODE")
     print("   Test mode - analyzes files but doesn't write tags")
     print("   Recommended: Enable for first run to see results")
