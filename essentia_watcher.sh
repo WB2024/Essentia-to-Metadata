@@ -59,7 +59,7 @@ DRY_RUN="${DRY_RUN:-false}"
 OVERWRITE="${OVERWRITE:-true}"
 
 # Audio file extensions to watch
-AUDIO_EXTENSIONS="flac|mp3|ogg|m4a|wav"
+AUDIO_EXTENSIONS="flac|mp3|ogg|oga|opus|m4a|m4b|mp4|aac|wma|aiff|aif|wav|wv|ape|mpc|mp\+|dsf"
 
 # Cooldown period in seconds (skip files processed within this time)
 # Prevents feedback loop when tagger writes metadata back to the file

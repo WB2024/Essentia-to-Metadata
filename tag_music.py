@@ -11,9 +11,35 @@ from pathlib import Path
 from datetime import datetime
 import numpy as np
 from essentia.standard import MonoLoader, TensorflowPredictEffnetDiscogs, TensorflowPredict2D
+import mutagen
 from mutagen.flac import FLAC
-from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TCON, COMM
+from mutagen.oggvorbis import OggVorbis
+from mutagen.oggopus import OggOpus
+from mutagen.mp4 import MP4
+from mutagen.aiff import AIFF
+from mutagen.wavpack import WavPack
+from mutagen.musepack import Musepack
+from mutagen.apev2 import APEv2
+from mutagen.asf import ASF
+
+# Supported audio file extensions
+# Analysis: all formats Essentia MonoLoader can decode (via FFmpeg)
+# Tag writing: each format uses an appropriate tag writer
+AUDIO_EXTENSIONS = {
+    '.flac',                    # FLAC - Vorbis comments
+    '.mp3',                     # MP3 - ID3v2
+    '.ogg', '.oga',             # Ogg Vorbis - Vorbis comments
+    '.opus',                    # Opus - Vorbis comments
+    '.m4a', '.m4b', '.mp4', '.aac',  # AAC/ALAC - MP4 atoms
+    '.wma',                     # WMA - ASF attributes
+    '.aiff', '.aif',            # AIFF - ID3v2
+    '.wav',                     # WAV - ID3v2 (via mutagen)
+    '.wv',                      # WavPack - APEv2
+    '.ape',                     # Monkey's Audio - APEv2
+    '.mpc', '.mp+',             # Musepack - APEv2
+    '.dsf',                     # DSD Stream File - ID3v2
+}
 
 # Model directory (fixed)
 MODEL_DIR = os.path.expanduser('~/essentia_models')
@@ -423,6 +449,20 @@ class TagWriter:
                 self._write_flac(filepath, results)
             elif file_ext == '.mp3':
                 self._write_mp3(filepath, results)
+            elif file_ext in ('.ogg', '.oga'):
+                self._write_ogg(filepath, results)
+            elif file_ext == '.opus':
+                self._write_opus(filepath, results)
+            elif file_ext in ('.m4a', '.m4b', '.mp4', '.aac'):
+                self._write_mp4(filepath, results)
+            elif file_ext == '.wma':
+                self._write_wma(filepath, results)
+            elif file_ext in ('.aiff', '.aif'):
+                self._write_aiff(filepath, results)
+            elif file_ext in ('.wav', '.dsf'):
+                self._write_id3_generic(filepath, results)
+            elif file_ext in ('.wv', '.ape', '.mpc', '.mp+'):
+                self._write_apev2(filepath, results)
             else:
                 self.logger.log(f"     ⚠️  Unsupported format: {file_ext}")
                 
@@ -430,11 +470,26 @@ class TagWriter:
             self.logger.log(f"     ⚠️  Error writing tags: {e}")
     
     def _write_flac(self, filepath, results):
-        """Write to FLAC tags"""
+        """Write to FLAC tags (Vorbis comments)"""
         audio = FLAC(filepath)
+        tags_written = self._write_vorbis_comments(audio, results)
+        if tags_written:
+            audio.save()
+            self.logger.log(f"     ✅ Written tags: {', '.join(tags_written)}", console=False)
+    
+    def _write_mp3(self, filepath, results):
+        """Write to MP3 ID3 tags"""
+        try:
+            audio = ID3(filepath)
+        except Exception:
+            audio = ID3()
+        self._write_id3_tags(audio, results)
+        audio.save(filepath)
+    
+    def _write_vorbis_comments(self, audio, results):
+        """Shared writer for Vorbis-comment-based formats (FLAC, OGG, Opus)"""
         tags_written = []
         
-        # Write genres (using formatted versions)
         if self.config.enable_genres and results.get('formatted_genres'):
             if self.config.overwrite_existing or 'GENRE' not in audio:
                 genre_str = '; '.join(results['formatted_genres'])
@@ -449,7 +504,6 @@ class TagWriter:
             else:
                 self.logger.log("     ⏭️  Skipping genres (already has GENRE tag)")
         
-        # Write moods (using formatted versions)
         if self.config.enable_moods and results.get('formatted_moods'):
             if self.config.overwrite_existing or 'MOOD' not in audio:
                 mood_str = '; '.join(results['formatted_moods'][:3])
@@ -464,33 +518,134 @@ class TagWriter:
             else:
                 self.logger.log("     ⏭️  Skipping moods (already has MOOD tag)")
         
+        return tags_written
+    
+    def _write_ogg(self, filepath, results):
+        """Write to OGG Vorbis tags"""
+        audio = OggVorbis(filepath)
+        tags_written = self._write_vorbis_comments(audio, results)
         if tags_written:
             audio.save()
             self.logger.log(f"     ✅ Written tags: {', '.join(tags_written)}", console=False)
     
-    def _write_mp3(self, filepath, results):
-        """Write to MP3 ID3 tags"""
-        try:
-            audio = ID3(filepath)
-        except Exception:
-            audio = ID3()
-        
+    def _write_opus(self, filepath, results):
+        """Write to Opus tags"""
+        audio = OggOpus(filepath)
+        tags_written = self._write_vorbis_comments(audio, results)
+        if tags_written:
+            audio.save()
+            self.logger.log(f"     ✅ Written tags: {', '.join(tags_written)}", console=False)
+    
+    def _write_mp4(self, filepath, results):
+        """Write to MP4/M4A/AAC tags (iTunes-style atoms)"""
+        audio = MP4(filepath)
         tags_written = []
         
-        # Write genres (using formatted versions)
         if self.config.enable_genres and results.get('formatted_genres'):
-            has_existing_genre = bool(audio.getall('TCON'))
+            has_existing = '\xa9gen' in audio.tags if audio.tags else False
+            if self.config.overwrite_existing or not has_existing:
+                genre_str = '; '.join(results['formatted_genres'])
+                audio['\xa9gen'] = [genre_str]
+                tags_written.append(f"genre={genre_str}")
+                
+                if self.config.write_confidence_tags and results.get('genres'):
+                    genre_details = [f"{g['label']}: {g['confidence']:.2%}" for g in results['genres']]
+                    confidence_str = ', '.join(genre_details)
+                    audio['\xa9cmt'] = [f"Essentia Genre: {confidence_str}"]
+                    tags_written.append(f"comment(genre)={confidence_str}")
+            else:
+                self.logger.log("     ⏭️  Skipping genres (already has genre tag)")
+        
+        if self.config.enable_moods and results.get('formatted_moods'):
+            mood_str = '; '.join(results['formatted_moods'][:3])
+            audio['----:com.apple.iTunes:MOOD'] = [
+                mutagen.mp4.MP4FreeForm(mood_str.encode('utf-8'), dataformat=mutagen.mp4.AtomDataType.UTF8)
+            ]
+            tags_written.append(f"MOOD={mood_str}")
+            
+            if self.config.write_confidence_tags and results.get('moods'):
+                mood_details = [f"{m['label']}: {m['confidence']:.2%}" for m in results['moods'][:3]]
+                mood_conf_str = ', '.join(mood_details)
+                audio['----:com.apple.iTunes:ESSENTIA_MOOD'] = [
+                    mutagen.mp4.MP4FreeForm(mood_conf_str.encode('utf-8'), dataformat=mutagen.mp4.AtomDataType.UTF8)
+                ]
+                tags_written.append(f"ESSENTIA_MOOD={mood_conf_str}")
+        
+        if tags_written:
+            audio.save()
+            self.logger.log(f"     ✅ Written tags: {', '.join(tags_written)}", console=False)
+    
+    def _write_wma(self, filepath, results):
+        """Write to WMA/ASF tags"""
+        audio = ASF(filepath)
+        tags_written = []
+        
+        if self.config.enable_genres and results.get('formatted_genres'):
+            has_existing = 'WM/Genre' in audio if audio.tags else False
+            if self.config.overwrite_existing or not has_existing:
+                genre_str = '; '.join(results['formatted_genres'])
+                audio['WM/Genre'] = genre_str
+                tags_written.append(f"WM/Genre={genre_str}")
+                
+                if self.config.write_confidence_tags and results.get('genres'):
+                    genre_details = [f"{g['label']}: {g['confidence']:.2%}" for g in results['genres']]
+                    confidence_str = ', '.join(genre_details)
+                    audio['ESSENTIA_GENRE'] = f"Essentia: {confidence_str}"
+                    tags_written.append(f"ESSENTIA_GENRE={confidence_str}")
+            else:
+                self.logger.log("     ⏭️  Skipping genres (already has genre tag)")
+        
+        if self.config.enable_moods and results.get('formatted_moods'):
+            mood_str = '; '.join(results['formatted_moods'][:3])
+            audio['WM/Mood'] = mood_str
+            tags_written.append(f"WM/Mood={mood_str}")
+            
+            if self.config.write_confidence_tags and results.get('moods'):
+                mood_details = [f"{m['label']}: {m['confidence']:.2%}" for m in results['moods'][:3]]
+                mood_conf_str = ', '.join(mood_details)
+                audio['ESSENTIA_MOOD'] = f"Essentia: {mood_conf_str}"
+                tags_written.append(f"ESSENTIA_MOOD={mood_conf_str}")
+        
+        if tags_written:
+            audio.save()
+            self.logger.log(f"     ✅ Written tags: {', '.join(tags_written)}", console=False)
+    
+    def _write_aiff(self, filepath, results):
+        """Write to AIFF tags (ID3v2)"""
+        audio = AIFF(filepath)
+        if audio.tags is None:
+            audio.add_tags()
+        self._write_id3_tags(audio.tags, results)
+        audio.save()
+    
+    def _write_id3_generic(self, filepath, results):
+        """Write ID3v2 tags to WAV, DSF, etc. via mutagen.File"""
+        audio = mutagen.File(filepath)
+        if audio is None:
+            self.logger.log("     ⚠️  Could not open file for tagging")
+            return
+        if audio.tags is None:
+            audio.add_tags()
+        self._write_id3_tags(audio.tags, results)
+        audio.save()
+    
+    def _write_id3_tags(self, tags, results):
+        """Shared ID3v2 tag writer used by MP3, AIFF, WAV, DSF"""
+        tags_written = []
+        
+        if self.config.enable_genres and results.get('formatted_genres'):
+            has_existing_genre = bool(tags.getall('TCON'))
             if self.config.overwrite_existing or not has_existing_genre:
                 genre_str = '; '.join(results['formatted_genres'])
-                audio.delall('TCON')
-                audio.add(TCON(encoding=3, text=genre_str))
+                tags.delall('TCON')
+                tags.add(TCON(encoding=3, text=genre_str))
                 tags_written.append(f"TCON={genre_str}")
                 
                 if self.config.write_confidence_tags and results.get('genres'):
                     genre_details = [f"{g['label']}: {g['confidence']:.2%}" for g in results['genres']]
                     confidence_str = ', '.join(genre_details)
-                    audio.delall('COMM::eng')
-                    audio.add(COMM(
+                    tags.delall('COMM::eng')
+                    tags.add(COMM(
                         encoding=3,
                         lang='eng',
                         desc='Essentia Genre',
@@ -500,10 +655,9 @@ class TagWriter:
             else:
                 self.logger.log("     ⏭️  Skipping genres (already has GENRE tag)")
         
-        # Write moods in a separate comment (independent of genres)
         if self.config.enable_moods and results.get('formatted_moods'):
             mood_str = '; '.join(results['formatted_moods'][:3])
-            audio.add(COMM(
+            tags.add(COMM(
                 encoding=3,
                 lang='eng',
                 desc='Essentia Mood',
@@ -512,18 +666,61 @@ class TagWriter:
             tags_written.append(f"COMM(mood)={mood_str}")
         
         if tags_written:
-            audio.save(filepath)
+            self.logger.log(f"     ✅ Written tags: {', '.join(tags_written)}", console=False)
+    
+    def _write_apev2(self, filepath, results):
+        """Write APEv2 tags (WavPack, Monkey's Audio, Musepack)"""
+        try:
+            audio = mutagen.File(filepath)
+            if audio is None:
+                self.logger.log("     ⚠️  Could not open file for tagging")
+                return
+            if audio.tags is None:
+                audio.add_tags()
+        except Exception:
+            self.logger.log("     ⚠️  Could not read/create APEv2 tags")
+            return
+        
+        tags_written = []
+        
+        if self.config.enable_genres and results.get('formatted_genres'):
+            has_existing = 'Genre' in audio.tags
+            if self.config.overwrite_existing or not has_existing:
+                genre_str = '; '.join(results['formatted_genres'])
+                audio.tags['Genre'] = genre_str
+                tags_written.append(f"Genre={genre_str}")
+                
+                if self.config.write_confidence_tags and results.get('genres'):
+                    genre_details = [f"{g['label']}: {g['confidence']:.2%}" for g in results['genres']]
+                    confidence_str = ', '.join(genre_details)
+                    audio.tags['Essentia Genre'] = f"Essentia: {confidence_str}"
+                    tags_written.append(f"Essentia Genre={confidence_str}")
+            else:
+                self.logger.log("     ⏭️  Skipping genres (already has Genre tag)")
+        
+        if self.config.enable_moods and results.get('formatted_moods'):
+            mood_str = '; '.join(results['formatted_moods'][:3])
+            audio.tags['Mood'] = mood_str
+            tags_written.append(f"Mood={mood_str}")
+            
+            if self.config.write_confidence_tags and results.get('moods'):
+                mood_details = [f"{m['label']}: {m['confidence']:.2%}" for m in results['moods'][:3]]
+                mood_conf_str = ', '.join(mood_details)
+                audio.tags['Essentia Mood'] = f"Essentia: {mood_conf_str}"
+                tags_written.append(f"Essentia Mood={mood_conf_str}")
+        
+        if tags_written:
+            audio.save()
             self.logger.log(f"     ✅ Written tags: {', '.join(tags_written)}", console=False)
 
 
 def scan_library(root_path, analyzer, tag_writer, config, logger):
     """Recursively scan and process music library"""
     root = Path(root_path)
-    audio_extensions = {'.flac', '.mp3', '.ogg', '.m4a', '.wav'}
     
     logger.log("\n🔍 Scanning for audio files...")
     files = list(root.rglob('*'))
-    audio_files = [f for f in files if f.suffix.lower() in audio_extensions]
+    audio_files = [f for f in files if f.suffix.lower() in AUDIO_EXTENSIONS]
     
     if not audio_files:
         logger.log("❌ No audio files found in this directory!")
@@ -634,9 +831,8 @@ def get_music_path():
             continue
         
         # Preview what will be scanned
-        audio_extensions = {'.flac', '.mp3', '.ogg', '.m4a', '.wav'}
         sample_files = list(path.rglob('*'))
-        audio_count = len([f for f in sample_files if f.suffix.lower() in audio_extensions])
+        audio_count = len([f for f in sample_files if f.suffix.lower() in AUDIO_EXTENSIONS])
         
         print(f"\n📂 Directory: {path}")
         print(f"🎵 Found ~{audio_count} audio files")
@@ -1030,8 +1226,7 @@ def process_single_file(filepath, analyzer, tag_writer, config, logger):
         logger.log(f"❌ File not found: {filepath}")
         return False
     
-    audio_extensions = {'.flac', '.mp3', '.ogg', '.m4a', '.wav'}
-    if filepath.suffix.lower() not in audio_extensions:
+    if filepath.suffix.lower() not in AUDIO_EXTENSIONS:
         logger.log(f"⏭️ Skipping non-audio file: {filepath}")
         return False
     
