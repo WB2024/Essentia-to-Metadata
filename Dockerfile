@@ -34,7 +34,7 @@ ENV HOME=/app
 RUN sed -i 's/\r$//' download_models.sh && bash download_models.sh
 
 # Copy application code
-COPY tag_music.py docker-entrypoint.py ./
+COPY tag_music.py docker-entrypoint.py riff_info.py comment_merge.py ./
 
 # Suppress noisy TensorFlow logs (INFO + WARNING)
 ENV TF_CPP_MIN_LOG_LEVEL=3
