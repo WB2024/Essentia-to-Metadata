@@ -27,6 +27,8 @@ from mutagen.musepack import Musepack
 from mutagen.apev2 import APEv2
 from mutagen.asf import ASF
 
+from comment_merge import build_mood_marker, merge_mood_into_comment
+
 # Supported audio file extensions
 # Analysis: all formats Essentia MonoLoader can decode (via FFmpeg)
 # Tag writing: each format uses an appropriate tag writer
@@ -181,6 +183,7 @@ Analysis Mode: {mode_label}
   - Verbose output: {config.verbose}
   - Parallel workers: {config.workers}
   - Max audio duration: {int(config.max_audio_duration) if config.max_audio_duration < float('inf') else 'unlimited'}s
+  - Rekordbox-compatible mood writing: {config.rb_write}
 {'=' * 80}
 
 """
@@ -304,6 +307,10 @@ class Config:
         self.default_library_path = None
         self.workers = max(1, (os.cpu_count() or 2) // 2)
         self.max_audio_duration = 300  # seconds — cap audio sent to TF models
+        # Rekordbox-compatible writing: append mood as a [MOOD: ...] marker
+        # inside the standard "comment" field instead of (or in addition to)
+        # a custom-description COMM/MOOD tag. See comment_merge.py for details.
+        self.rb_write = False
 
 
 class EssentiaAnalyzer:
@@ -706,15 +713,53 @@ class TagWriter:
                 self.logger.log("     ⏭️  Skipping genres (already has GENRE tag)")
         
         if self.config.enable_moods and results.get('formatted_moods'):
-            mood_str = '; '.join(results['formatted_moods'][:3])
-            tags.add(COMM(
-                encoding=3,
-                lang='eng',
-                desc='Essentia Mood',
-                text=mood_str
-            ))
-            tags_written.append(f"COMM(mood)={mood_str}")
-        
+            if self.config.rb_write:
+                # Rekordbox-compatible path: append a [MOOD: ...] marker to
+                # the standard (empty-description) Comments field. We read
+                # the current comment text first, run it through the merge
+                # function (which strips any prior marker and appends the
+                # new one), then write it back. This preserves Mixed In Key
+                # output and any user comments while keeping mood data
+                # visible in Rekordbox.
+                top_moods = results['formatted_moods'][:3]
+                if (self.config.write_confidence_tags
+                        and results.get('moods')):
+                    confidences = [
+                        m['confidence'] for m in results['moods'][:3]
+                    ]
+                    mood_marker = build_mood_marker(top_moods, confidences)
+                else:
+                    mood_marker = build_mood_marker(top_moods)
+
+                existing_comm = tags.get('COMM::eng')
+                existing_text = ''
+                if existing_comm is not None and existing_comm.text:
+                    existing_text = existing_comm.text[0]
+
+                new_text = merge_mood_into_comment(
+                    existing_text, mood_marker
+                )
+                tags.delall('COMM::eng')
+                tags.add(COMM(
+                    encoding=3,
+                    lang='eng',
+                    desc='',
+                    text=new_text,
+                ))
+                tags_written.append(f"COMM={new_text}")
+            else:
+                # Original behaviour: write to a custom-description COMM
+                # frame. Not visible in Rekordbox but preserved for
+                # Mp3tag / foobar2000 / etc.
+                mood_str = '; '.join(results['formatted_moods'][:3])
+                tags.add(COMM(
+                    encoding=3,
+                    lang='eng',
+                    desc='Essentia Mood',
+                    text=mood_str
+                ))
+                tags_written.append(f"COMM(mood)={mood_str}")
+
         if tags_written:
             self.logger.log(f"     ✅ Written tags: {', '.join(tags_written)}", console=False)
     
@@ -1608,6 +1653,21 @@ def configure_settings():
     print("   • Overwrite: Replace existing tags")
     print("   • Skip: Leave files with existing tags untouched")
     config.overwrite_existing = get_yes_no("Overwrite existing tags?", default=False)
+
+    # Rekordbox-compatible writing
+    if config.enable_moods:
+        print("\n" + "─" * 70)
+        print("🎛️  REKORDBOX-COMPATIBLE MOOD WRITING")
+        print("   Rekordbox has no native Mood field, so the standard MOOD")
+        print("   tag is invisible there. With this option enabled, mood is")
+        print("   appended to the file's Comments field as a marker:")
+        print("     [MOOD: Happy; Energetic; Uplifting]")
+        print("   This shows up in Rekordbox's Comments column and coexists")
+        print("   with Mixed In Key's Energy/Key prefix.")
+        print("   Currently affects MP3 / AIFF / DSF only.")
+        config.rb_write = get_yes_no(
+            "Enable Rekordbox-compatible mood writing?", default=False
+        )
     
     # Verbose output
     print("\n" + "─" * 70)
@@ -1667,6 +1727,7 @@ def display_config_summary(config, music_path):
     print(f"   • Overwrite existing: {config.overwrite_existing}")
     print(f"   • Verbose output: {config.verbose}")
     print(f"   • Parallel workers: {config.workers}")
+    print(f"   • Rekordbox-compatible mood writing: {config.rb_write}")
     if config.max_audio_duration < float('inf'):
         print(f"   • Max audio duration: {int(config.max_audio_duration)}s")
     else:
@@ -1856,7 +1917,19 @@ Genre format styles:
         metavar='SECS',
         help='Max seconds of audio to analyze per track (default: 300, 0 = no limit)'
     )
-    
+
+    parser.add_argument(
+        '--rb-write',
+        action='store_true',
+        help=(
+            'Rekordbox-compatible mood writing: append mood as a '
+            '[MOOD: ...] marker inside the standard Comments field so it is '
+            'visible in Rekordbox. Coexists with Mixed In Key output. '
+            'Currently affects MP3/AIFF/DSF (ID3) only; other formats follow '
+            'in subsequent work.'
+        )
+    )
+
     return parser.parse_args()
 
 
@@ -1880,6 +1953,7 @@ def config_from_args(args):
     config.genre_format = args.genre_format
     config.workers = args.workers if args.workers > 0 else max(1, (os.cpu_count() or 2) // 2)
     config.max_audio_duration = args.max_duration if args.max_duration > 0 else float('inf')
+    config.rb_write = args.rb_write
     
     # Handle library path
     if args.library:
