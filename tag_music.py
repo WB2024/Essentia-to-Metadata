@@ -27,7 +27,7 @@ from mutagen.musepack import Musepack
 from mutagen.apev2 import APEv2
 from mutagen.asf import ASF
 
-from comment_merge import build_mood_marker, merge_mood_into_comment
+from comment_merge import build_mood_marker, merge_mood_into_comment, MOOD_MARKER_RE
 from riff_info import read_riff_info, update_riff_info
 
 # Supported audio file extensions
@@ -981,11 +981,16 @@ class TagWriter:
             self.logger.log(f"     ✅ Written tags: {', '.join(tags_written)}", console=False)
 
 
-def has_existing_tags(filepath, enable_genres, enable_moods):
-    """Quick check if file already has genre/mood tags (avoids expensive analysis)."""
+def has_existing_tags(filepath, enable_genres, enable_moods, rb_write=False):
+    """Quick check if file already has genre/mood tags (avoids expensive analysis).
+
+    When rb_write is True, mood detection searches for a [MOOD: ...] marker
+    inside each format's standard comment field instead of looking for the
+    dedicated MOOD / WM/Mood / Essentia Mood tags used in non-rb_write mode.
+    """
     try:
         audio = mutagen.File(filepath)
-        if audio is None or audio.tags is None:
+        if audio is None:
             return False
 
         ext = Path(filepath).suffix.lower()
@@ -993,40 +998,86 @@ def has_existing_tags(filepath, enable_genres, enable_moods):
         has_mood = False
 
         if ext in ('.flac', '.ogg', '.oga', '.opus'):
+            if audio.tags is None:
+                return False
             has_genre = 'GENRE' in audio
-            has_mood = 'MOOD' in audio
+            if rb_write:
+                comment_val = (
+                    audio['COMMENT'][0]
+                    if 'COMMENT' in audio and audio['COMMENT']
+                    else ''
+                )
+                has_mood = bool(MOOD_MARKER_RE.search(comment_val))
+            else:
+                has_mood = 'MOOD' in audio
+
         elif ext == '.wav':
-            # Genre is written to RIFF INFO IGNR; check that first.
-            # Mood marker detection in ICMT is deferred to step 6 of the plan.
             try:
                 info = read_riff_info(filepath)
                 has_genre = bool(info.get(b'IGNR', '').strip())
             except Exception:
+                info = {}
                 has_genre = False
+            # Fall back to ID3 TCON for files tagged before the RIFF INFO writer
             if not has_genre and audio.tags:
                 has_genre = bool(audio.tags.getall('TCON'))
-            has_mood = bool(audio.tags and any(
-                getattr(c, 'desc', '') == 'Essentia Mood'
-                for c in audio.tags.getall('COMM')
-            ))
+            if rb_write:
+                icmt = info.get(b'ICMT', '')
+                has_mood = bool(MOOD_MARKER_RE.search(icmt))
+            else:
+                has_mood = bool(audio.tags and any(
+                    getattr(c, 'desc', '') == 'Essentia Mood'
+                    for c in audio.tags.getall('COMM')
+                ))
+
         elif ext in ('.mp3', '.aiff', '.aif', '.dsf'):
+            if audio.tags is None:
+                return False
             tags = audio.tags
-            if tags:
-                has_genre = bool(tags.getall('TCON'))
+            has_genre = bool(tags.getall('TCON'))
+            if rb_write:
+                comm = tags.get('COMM::eng')
+                text = comm.text[0] if comm and comm.text else ''
+                has_mood = bool(MOOD_MARKER_RE.search(text))
+            else:
                 has_mood = any(
                     getattr(c, 'desc', '') == 'Essentia Mood'
                     for c in tags.getall('COMM')
                 )
+
         elif ext in ('.m4a', '.m4b', '.mp4', '.aac'):
+            if audio.tags is None:
+                return False
             has_genre = '\xa9gen' in audio
-            has_mood = '----:com.apple.iTunes:MOOD' in audio
+            if rb_write:
+                cmt = audio.tags.get('\xa9cmt')
+                text = str(cmt[0]) if cmt else ''
+                has_mood = bool(MOOD_MARKER_RE.search(text))
+            else:
+                has_mood = '----:com.apple.iTunes:MOOD' in audio
+
         elif ext == '.wma':
+            if audio.tags is None:
+                return False
             has_genre = 'WM/Genre' in audio
-            has_mood = 'WM/Mood' in audio
+            if rb_write:
+                wm_cmt = audio.get('WM/Comments')
+                text = str(wm_cmt[0]) if wm_cmt else ''
+                has_mood = bool(MOOD_MARKER_RE.search(text))
+            else:
+                has_mood = 'WM/Mood' in audio
+
         elif ext in ('.wv', '.ape', '.mpc', '.mp+'):
-            tags = audio.tags or {}
+            if audio.tags is None:
+                return False
+            tags = audio.tags
             has_genre = 'Genre' in tags
-            has_mood = 'Mood' in tags
+            if rb_write:
+                val = tags.get('Comment')
+                comment_val = val[0] if isinstance(val, list) else str(val) if val else ''
+                has_mood = bool(MOOD_MARKER_RE.search(comment_val))
+            else:
+                has_mood = 'Mood' in tags
 
         if enable_genres and enable_moods:
             return has_genre and has_mood
@@ -1095,7 +1146,7 @@ def _worker_process_file(args):
     try:
         # Early skip: check existing tags before expensive analysis
         if not config_dict['overwrite_existing'] and not config_dict['dry_run']:
-            if has_existing_tags(filepath, config_dict['enable_genres'], config_dict['enable_moods']):
+            if has_existing_tags(filepath, config_dict['enable_genres'], config_dict['enable_moods'], config_dict['rb_write']):
                 return {'filepath': filepath_str, 'status': 'skipped'}
 
         from essentia.standard import MonoLoader
@@ -1254,7 +1305,7 @@ def _scan_sequential(audio_files, root, analyzer, tag_writer, config, logger):
         
         # Early skip: avoid expensive analysis if tags already exist
         if not config.overwrite_existing and not config.dry_run:
-            if has_existing_tags(filepath, config.enable_genres, config.enable_moods):
+            if has_existing_tags(filepath, config.enable_genres, config.enable_moods, config.rb_write):
                 logger.log(f"[{i}/{total}] ⏭️  {relative_path} (already tagged)")
                 skipped += 1
                 logger.log("")
@@ -1294,6 +1345,7 @@ def _scan_parallel(audio_files, root, tag_writer, config, logger):
         'mood_threshold': config.mood_threshold,
         'genre_format': config.genre_format,
         'overwrite_existing': config.overwrite_existing,
+        'rb_write': config.rb_write,
         'dry_run': config.dry_run,
         'write_confidence_tags': config.write_confidence_tags,
         'verbose': config.verbose,

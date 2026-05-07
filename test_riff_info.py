@@ -13,6 +13,7 @@ from riff_info import (
     _encode_subchunk,
     _locate_list_info,
     _parse_riff_info,
+    _validate_wav_structure,
     read_riff_info,
     update_riff_info,
 )
@@ -318,6 +319,120 @@ class TestUpdateRiffInfo(unittest.TestCase):
             update_riff_info(path, {b'ICMT': new_val})
         result = read_riff_info(path)[b'ICMT']
         self.assertEqual(result.count('[MOOD:'), 1)
+
+
+# ---------------------------------------------------------------------------
+# _validate_wav_structure
+# ---------------------------------------------------------------------------
+
+def _make_chunk(fourcc, body):
+    """Build a single raw RIFF chunk (header + body, no pad)."""
+    return fourcc + struct.pack('<I', len(body)) + body
+
+
+def _make_chunk_padded(fourcc, body):
+    """Build a RIFF chunk with padding byte when body length is odd."""
+    chunk = _make_chunk(fourcc, body)
+    if len(body) % 2 != 0:
+        chunk += b'\x00'
+    return chunk
+
+
+class TestValidateWavStructure(unittest.TestCase):
+
+    def test_valid_wav_passes(self):
+        # A well-formed minimal WAV should not raise.
+        _validate_wav_structure(_make_wav())
+
+    def test_valid_wav_with_list_info_passes(self):
+        _validate_wav_structure(_make_wav(_make_list_info(ICMT='ok')))
+
+    def test_non_wav_raises(self):
+        with self.assertRaises(ValueError):
+            _validate_wav_structure(b'this is not a wav')
+
+    def test_oversized_chunk_raises(self):
+        # Build a chunk whose declared size runs past end of file.
+        bad_chunk = b'data' + struct.pack('<I', 9999) + b'\x00' * 4
+        wav = _make_wav(bad_chunk)
+        with self.assertRaises(ValueError) as ctx:
+            _validate_wav_structure(wav)
+        self.assertIn('data', str(ctx.exception))
+
+    def test_error_names_the_bad_chunk(self):
+        bad_chunk = b'bext' + struct.pack('<I', 9999) + b'\x00' * 4
+        wav = _make_wav(bad_chunk)
+        with self.assertRaises(ValueError) as ctx:
+            _validate_wav_structure(wav)
+        self.assertIn('bext', str(ctx.exception))
+
+    def test_bext_chunk_passes_when_well_formed(self):
+        # Pro Tools broadcast WAV extension chunk; 602 bytes minimum.
+        bext_body = b'\x00' * 602
+        bext = _make_chunk_padded(b'bext', bext_body)
+        _validate_wav_structure(_make_wav(bext))
+
+    def test_junk_chunk_passes_when_well_formed(self):
+        # Rekordbox alignment padding chunk.
+        junk = _make_chunk_padded(b'JUNK', b'\x00' * 28)
+        _validate_wav_structure(_make_wav(junk))
+
+    def test_lowercase_junk_chunk_passes(self):
+        junk = _make_chunk_padded(b'junk', b'\x00' * 16)
+        _validate_wav_structure(_make_wav(junk))
+
+    def test_multiple_valid_chunks_pass(self):
+        bext = _make_chunk_padded(b'bext', b'\x00' * 602)
+        junk = _make_chunk_padded(b'JUNK', b'\x00' * 28)
+        list_info = _make_list_info(ICMT='test', IGNR='Rock')
+        _validate_wav_structure(_make_wav(bext, junk, list_info))
+
+    def test_zero_size_chunk_passes(self):
+        # A chunk with size 0 is unusual but valid.
+        empty_chunk = _make_chunk(b'PAD ', b'')
+        _validate_wav_structure(_make_wav(empty_chunk))
+
+    def test_label_appears_in_error_message(self):
+        bad_chunk = b'data' + struct.pack('<I', 9999) + b'\x00' * 4
+        wav = _make_wav(bad_chunk)
+        with self.assertRaises(ValueError) as ctx:
+            _validate_wav_structure(wav, label='my_file.wav')
+        self.assertIn('my_file.wav', str(ctx.exception))
+
+
+class TestUpdateRiffInfoValidation(unittest.TestCase):
+    """Verify update_riff_info refuses to write when the WAV is malformed."""
+
+    def _write_temp(self, wav_bytes):
+        tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+        tmp.write(wav_bytes)
+        tmp.close()
+        return tmp.name
+
+    def test_malformed_wav_raises_before_write(self):
+        # Build a WAV with a chunk whose size runs past EOF.
+        bad_chunk = b'data' + struct.pack('<I', 9999) + b'\x00' * 4
+        path = self._write_temp(_make_wav(bad_chunk))
+        original_bytes = Path(path).read_bytes()
+
+        with self.assertRaises(ValueError):
+            update_riff_info(path, {b'ICMT': 'should not be written'})
+
+        # File must be byte-identical to what it was before the call.
+        self.assertEqual(Path(path).read_bytes(), original_bytes)
+
+    def test_well_formed_wav_with_extra_chunks_writes_correctly(self):
+        # bext + JUNK + existing LIST INFO — all well-formed.
+        bext = _make_chunk_padded(b'bext', b'\x00' * 602)
+        junk = _make_chunk_padded(b'JUNK', b'\x00' * 28)
+        list_info = _make_list_info(IGNR='Jazz')
+        path = self._write_temp(_make_wav(bext, junk, list_info))
+
+        update_riff_info(path, {b'ICMT': 'added'})
+
+        result = read_riff_info(path)
+        self.assertEqual(result[b'IGNR'], 'Jazz')
+        self.assertEqual(result[b'ICMT'], 'added')
 
 
 if __name__ == '__main__':

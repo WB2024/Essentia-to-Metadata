@@ -35,6 +35,28 @@ def _validate_riff_wave(data, label=''):
         raise ValueError(f"Not a RIFF WAVE file{': ' + label if label else ''}")
 
 
+def _validate_wav_structure(data, label=''):
+    """Walk every top-level RIFF chunk and raise ValueError if any chunk
+    declares a size that would extend past the end of the file.
+
+    Called by update_riff_info before making any changes.  A malformed or
+    unusual chunk layout is caught here so the file is never touched.
+    """
+    _validate_riff_wave(data, label)
+    pos = 12
+    while pos + 8 <= len(data):
+        fourcc = data[pos:pos + 4]
+        size = struct.unpack_from('<I', data, pos + 4)[0]
+        if pos + 8 + size > len(data):
+            name = fourcc.decode('latin-1', errors='replace')
+            suffix = f' in {label}' if label else ''
+            raise ValueError(
+                f"WAV chunk '{name}' at offset {pos} declares size {size} "
+                f"but only {len(data) - pos - 8} bytes remain{suffix}"
+            )
+        pos += 8 + size + (size % 2)
+
+
 def _parse_riff_info(data):
     """Return {fourcc_bytes: str} from the first LIST/INFO chunk in *data*.
 
@@ -126,7 +148,7 @@ def update_riff_info(filepath, updates):
     """
     path = Path(filepath)
     data = path.read_bytes()
-    _validate_riff_wave(data, str(filepath))
+    _validate_wav_structure(data, str(filepath))
 
     # Normalise key types to bytes
     norm = {(k.encode('ascii') if isinstance(k, str) else k): v
