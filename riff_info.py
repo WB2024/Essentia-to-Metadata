@@ -165,6 +165,13 @@ def update_riff_info(filepath, updates):
         start, end = loc
         new_data = data[:start] + new_list + data[end:]
     else:
+        # If the file ends at an odd offset, the last existing chunk omitted
+        # its spec-required pad byte (legal for the final chunk only).  Add
+        # the pad byte before our new chunk so downstream chunk-walkers,
+        # which advance by `8 + size + (size % 2)`, land on the correct
+        # offset for the LIST INFO chunk we're about to append.
+        if len(data) % 2 != 0:
+            data = data + b'\x00'
         new_data = data + new_list
 
     # Fix RIFF size header (excludes the 8-byte 'RIFF'+size header itself)

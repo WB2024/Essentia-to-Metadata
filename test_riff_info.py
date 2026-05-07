@@ -296,6 +296,42 @@ class TestUpdateRiffInfo(unittest.TestCase):
         with self.assertRaises(ValueError):
             update_riff_info(tmp.name, {b'ICMT': 'x'})
 
+    def test_appends_pad_byte_when_existing_data_is_odd_length(self):
+        """A WAV whose last chunk omitted its pad byte (file length odd) must
+        get a pad byte inserted before the appended LIST INFO so that
+        downstream chunk-walkers don't land at a misaligned offset."""
+        fmt_body = _fmt_chunk()
+        fmt_chunk = b'fmt ' + struct.pack('<I', len(fmt_body)) + fmt_body
+        odd_samples = b'\x10\x20\x30'   # 3 bytes (odd) — no trailing pad
+        data_chunk = b'data' + struct.pack('<I', len(odd_samples)) + odd_samples
+        body = b'WAVE' + fmt_chunk + data_chunk
+        odd_wav = b'RIFF' + struct.pack('<I', len(body)) + body
+        # Sanity: setup must actually produce an odd-length file
+        self.assertEqual(len(odd_wav) % 2, 1)
+
+        path = self._write_temp(odd_wav)
+        update_riff_info(path, {b'ICMT': 'rb-mood marker'})
+
+        new_data = Path(path).read_bytes()
+
+        # File is now even-aligned
+        self.assertEqual(len(new_data) % 2, 0)
+
+        # RIFF size header matches new file length minus 8
+        stored_size = struct.unpack_from('<I', new_data, 4)[0]
+        self.assertEqual(stored_size, len(new_data) - 8)
+
+        # The new ICMT round-trips
+        self.assertEqual(read_riff_info(path)[b'ICMT'], 'rb-mood marker')
+
+        # Pre-existing chunks are still intact
+        self.assertIn(b'fmt ', new_data)
+        self.assertIn(b'data', new_data)
+        self.assertIn(odd_samples, new_data)
+
+        # The full structural validator must accept the rewritten file
+        _validate_wav_structure(new_data)
+
     def test_mood_marker_merge_via_comment_merge(self):
         """Integration: merging a [MOOD:] marker into an existing ICMT value."""
         from comment_merge import build_mood_marker, merge_mood_into_comment
