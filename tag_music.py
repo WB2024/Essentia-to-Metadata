@@ -28,6 +28,7 @@ from mutagen.apev2 import APEv2
 from mutagen.asf import ASF
 
 from comment_merge import build_mood_marker, merge_mood_into_comment
+from riff_info import read_riff_info, update_riff_info
 
 # Supported audio file extensions
 # Analysis: all formats Essentia MonoLoader can decode (via FFmpeg)
@@ -516,7 +517,9 @@ class TagWriter:
                 self._write_wma(filepath, results)
             elif file_ext in ('.aiff', '.aif'):
                 self._write_aiff(filepath, results)
-            elif file_ext in ('.wav', '.dsf'):
+            elif file_ext == '.wav':
+                self._write_wav(filepath, results)
+            elif file_ext == '.dsf':
                 self._write_id3_generic(filepath, results)
             elif file_ext in ('.wv', '.ape', '.mpc', '.mp+'):
                 self._write_apev2(filepath, results)
@@ -765,6 +768,65 @@ class TagWriter:
         self._write_id3_tags(audio.tags, results)
         audio.save()
     
+    def _write_wav(self, filepath, results):
+        """Write genre/mood to a WAV file via RIFF INFO chunks (Rekordbox-visible).
+
+        Rekordbox reads RIFF INFO, not ID3, from WAV files.  Genre goes to
+        IGNR; the rb_write mood marker goes to ICMT (merged with any existing
+        comment).  For non-rb_write mode the existing ID3-in-WAV path is also
+        called so that foobar2000 / Mp3tag users still see mood data.
+        """
+        try:
+            existing_info = read_riff_info(filepath)
+        except ValueError as exc:
+            self.logger.log(f"     ⚠️  RIFF INFO read error: {exc}")
+            return
+
+        riff_updates = {}
+        tags_written = []
+
+        if self.config.enable_genres and results.get('formatted_genres'):
+            has_existing = bool(existing_info.get(b'IGNR', '').strip())
+            if self.config.overwrite_existing or not has_existing:
+                genre_str = '; '.join(results['formatted_genres'])
+                riff_updates[b'IGNR'] = genre_str
+                tags_written.append(f'IGNR={genre_str}')
+            else:
+                self.logger.log("     ⏭️  Skipping genres (already has IGNR tag)")
+
+        if self.config.enable_moods and results.get('formatted_moods'):
+            if self.config.rb_write:
+                top_moods = results['formatted_moods'][:3]
+                if (self.config.write_confidence_tags
+                        and results.get('moods')):
+                    confidences = [
+                        m['confidence'] for m in results['moods'][:3]
+                    ]
+                    mood_marker = build_mood_marker(top_moods, confidences)
+                else:
+                    mood_marker = build_mood_marker(top_moods)
+
+                existing_icmt = existing_info.get(b'ICMT', '')
+                new_icmt = merge_mood_into_comment(existing_icmt, mood_marker)
+                riff_updates[b'ICMT'] = new_icmt
+                tags_written.append(f'ICMT={new_icmt}')
+
+        if riff_updates:
+            try:
+                update_riff_info(filepath, riff_updates)
+            except Exception as exc:
+                self.logger.log(f"     ⚠️  RIFF INFO write failed: {exc}")
+                return
+            self.logger.log(
+                f"     ✅ Written RIFF INFO: {', '.join(tags_written)}",
+                console=False,
+            )
+
+        # For non-rb_write mode also write ID3 tags inside the WAV container
+        # so non-Rekordbox players (foobar2000, Mp3tag) can read mood/genre.
+        if not self.config.rb_write:
+            self._write_id3_generic(filepath, results)
+
     def _write_id3_tags(self, tags, results):
         """Shared ID3v2 tag writer used by MP3, AIFF, WAV, DSF"""
         tags_written = []
@@ -933,7 +995,21 @@ def has_existing_tags(filepath, enable_genres, enable_moods):
         if ext in ('.flac', '.ogg', '.oga', '.opus'):
             has_genre = 'GENRE' in audio
             has_mood = 'MOOD' in audio
-        elif ext in ('.mp3', '.aiff', '.aif', '.wav', '.dsf'):
+        elif ext == '.wav':
+            # Genre is written to RIFF INFO IGNR; check that first.
+            # Mood marker detection in ICMT is deferred to step 6 of the plan.
+            try:
+                info = read_riff_info(filepath)
+                has_genre = bool(info.get(b'IGNR', '').strip())
+            except Exception:
+                has_genre = False
+            if not has_genre and audio.tags:
+                has_genre = bool(audio.tags.getall('TCON'))
+            has_mood = bool(audio.tags and any(
+                getattr(c, 'desc', '') == 'Essentia Mood'
+                for c in audio.tags.getall('COMM')
+            ))
+        elif ext in ('.mp3', '.aiff', '.aif', '.dsf'):
             tags = audio.tags
             if tags:
                 has_genre = bool(tags.getall('TCON'))
@@ -1774,8 +1850,8 @@ def configure_settings():
         print("     [MOOD: Happy; Energetic; Uplifting]")
         print("   This shows up in Rekordbox's Comments column and coexists")
         print("   with Mixed In Key's Energy/Key prefix.")
-        print("   Supported on MP3 / AIFF / DSF / FLAC / OGG / Opus /")
-        print("   MP4 / M4A / WMA / APEv2 (WAV pending in a later step).")
+        print("   Supported on MP3 / AIFF / DSF / WAV / FLAC / OGG / Opus /")
+        print("   MP4 / M4A / WMA / APEv2.")
         config.rb_write = get_yes_no(
             "Enable Rekordbox-compatible mood writing?", default=False
         )
@@ -2036,8 +2112,7 @@ Genre format styles:
             'Rekordbox-compatible mood writing: append mood as a '
             '[MOOD: ...] marker inside the standard Comments field so it is '
             'visible in Rekordbox. Coexists with Mixed In Key output. '
-            'Supports MP3/AIFF/DSF/FLAC/OGG/Opus/MP4/M4A/WMA/APEv2 '
-            '(WAV pending in a later step).'
+            'Supports MP3/AIFF/DSF/WAV/FLAC/OGG/Opus/MP4/M4A/WMA/APEv2.'
         )
     )
 
