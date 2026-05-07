@@ -701,7 +701,12 @@ class TagWriter:
                 if self.config.write_confidence_tags and results.get('genres'):
                     genre_details = [f"{g['label']}: {g['confidence']:.2%}" for g in results['genres']]
                     confidence_str = ', '.join(genre_details)
-                    tags.delall('COMM::eng')
+                    # Delete only any prior 'Essentia Genre' confidence frame.
+                    # The previous key 'COMM::eng' targeted the *empty-desc*
+                    # English COMM, i.e. the user's main Comments field,
+                    # which would be wiped on every run. The correct hash key
+                    # for a description-tagged frame is 'COMM:<desc>:<lang>'.
+                    tags.delall('COMM:Essentia Genre:eng')
                     tags.add(COMM(
                         encoding=3,
                         lang='eng',
