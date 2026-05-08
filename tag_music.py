@@ -27,6 +27,9 @@ from mutagen.musepack import Musepack
 from mutagen.apev2 import APEv2
 from mutagen.asf import ASF
 
+from comment_merge import build_mood_marker, merge_mood_into_comment, MOOD_MARKER_RE
+from riff_info import read_riff_info, update_riff_info
+
 # Supported audio file extensions
 # Analysis: all formats Essentia MonoLoader can decode (via FFmpeg)
 # Tag writing: each format uses an appropriate tag writer
@@ -181,6 +184,7 @@ Analysis Mode: {mode_label}
   - Verbose output: {config.verbose}
   - Parallel workers: {config.workers}
   - Max audio duration: {int(config.max_audio_duration) if config.max_audio_duration < float('inf') else 'unlimited'}s
+  - Rekordbox-compatible mood writing: {config.rb_write}
 {'=' * 80}
 
 """
@@ -304,6 +308,10 @@ class Config:
         self.default_library_path = None
         self.workers = max(1, (os.cpu_count() or 2) // 2)
         self.max_audio_duration = 300  # seconds — cap audio sent to TF models
+        # Rekordbox-compatible writing: append mood as a [MOOD: ...] marker
+        # inside the standard "comment" field instead of (or in addition to)
+        # a custom-description COMM/MOOD tag. See comment_merge.py for details.
+        self.rb_write = False
 
 
 class EssentiaAnalyzer:
@@ -509,7 +517,9 @@ class TagWriter:
                 self._write_wma(filepath, results)
             elif file_ext in ('.aiff', '.aif'):
                 self._write_aiff(filepath, results)
-            elif file_ext in ('.wav', '.dsf'):
+            elif file_ext == '.wav':
+                self._write_wav(filepath, results)
+            elif file_ext == '.dsf':
                 self._write_id3_generic(filepath, results)
             elif file_ext in ('.wv', '.ape', '.mpc', '.mp+'):
                 self._write_apev2(filepath, results)
@@ -555,11 +565,33 @@ class TagWriter:
                 self.logger.log("     ⏭️  Skipping genres (already has GENRE tag)")
         
         if self.config.enable_moods and results.get('formatted_moods'):
-            if self.config.overwrite_existing or 'MOOD' not in audio:
+            if self.config.rb_write:
+                # Rekordbox-compatible path: merge a [MOOD: ...] marker into
+                # the standard Vorbis COMMENT field so it shows up in
+                # Rekordbox's Comments column. Coexists with Mixed In Key.
+                top_moods = results['formatted_moods'][:3]
+                if (self.config.write_confidence_tags
+                        and results.get('moods')):
+                    confidences = [
+                        m['confidence'] for m in results['moods'][:3]
+                    ]
+                    mood_marker = build_mood_marker(top_moods, confidences)
+                else:
+                    mood_marker = build_mood_marker(top_moods)
+
+                existing_text = ''
+                if 'COMMENT' in audio and audio['COMMENT']:
+                    existing_text = audio['COMMENT'][0]
+                new_text = merge_mood_into_comment(
+                    existing_text, mood_marker
+                )
+                audio['COMMENT'] = new_text
+                tags_written.append(f"COMMENT={new_text}")
+            elif self.config.overwrite_existing or 'MOOD' not in audio:
                 mood_str = '; '.join(results['formatted_moods'][:3])
                 audio['MOOD'] = mood_str
                 tags_written.append(f"MOOD={mood_str}")
-                
+
                 if self.config.write_confidence_tags and results.get('moods'):
                     mood_details = [f"{m['label']}: {m['confidence']:.2%}" for m in results['moods'][:3]]
                     mood_conf_str = ', '.join(mood_details)
@@ -567,7 +599,7 @@ class TagWriter:
                     tags_written.append(f"ESSENTIA_MOOD={mood_conf_str}")
             else:
                 self.logger.log("     ⏭️  Skipping moods (already has MOOD tag)")
-        
+
         return tags_written
     
     def _write_ogg(self, filepath, results):
@@ -601,25 +633,58 @@ class TagWriter:
                 if self.config.write_confidence_tags and results.get('genres'):
                     genre_details = [f"{g['label']}: {g['confidence']:.2%}" for g in results['genres']]
                     confidence_str = ', '.join(genre_details)
-                    audio['\xa9cmt'] = [f"Essentia Genre: {confidence_str}"]
-                    tags_written.append(f"comment(genre)={confidence_str}")
+                    # Use a custom iTunes freeform atom rather than \xa9cmt
+                    # (the user's main Comments field). The previous code
+                    # clobbered any existing comment on every run.
+                    audio['----:com.apple.iTunes:Essentia Genre'] = [
+                        mutagen.mp4.MP4FreeForm(
+                            confidence_str.encode('utf-8'),
+                            dataformat=mutagen.mp4.AtomDataType.UTF8,
+                        )
+                    ]
+                    tags_written.append(f"Essentia Genre={confidence_str}")
             else:
                 self.logger.log("     ⏭️  Skipping genres (already has genre tag)")
         
         if self.config.enable_moods and results.get('formatted_moods'):
-            mood_str = '; '.join(results['formatted_moods'][:3])
-            audio['----:com.apple.iTunes:MOOD'] = [
-                mutagen.mp4.MP4FreeForm(mood_str.encode('utf-8'), dataformat=mutagen.mp4.AtomDataType.UTF8)
-            ]
-            tags_written.append(f"MOOD={mood_str}")
-            
-            if self.config.write_confidence_tags and results.get('moods'):
-                mood_details = [f"{m['label']}: {m['confidence']:.2%}" for m in results['moods'][:3]]
-                mood_conf_str = ', '.join(mood_details)
-                audio['----:com.apple.iTunes:ESSENTIA_MOOD'] = [
-                    mutagen.mp4.MP4FreeForm(mood_conf_str.encode('utf-8'), dataformat=mutagen.mp4.AtomDataType.UTF8)
+            if self.config.rb_write:
+                # Rekordbox-compatible path: merge a [MOOD: ...] marker
+                # into the standard MP4 comment atom (\xa9cmt). Coexists
+                # with Mixed In Key.
+                top_moods = results['formatted_moods'][:3]
+                if (self.config.write_confidence_tags
+                        and results.get('moods')):
+                    confidences = [
+                        m['confidence'] for m in results['moods'][:3]
+                    ]
+                    mood_marker = build_mood_marker(top_moods, confidences)
+                else:
+                    mood_marker = build_mood_marker(top_moods)
+
+                existing_text = ''
+                if audio.tags and '\xa9cmt' in audio.tags:
+                    cmt = audio.tags['\xa9cmt']
+                    if cmt:
+                        existing_text = str(cmt[0])
+                new_text = merge_mood_into_comment(
+                    existing_text, mood_marker
+                )
+                audio['\xa9cmt'] = [new_text]
+                tags_written.append(f"comment={new_text}")
+            else:
+                mood_str = '; '.join(results['formatted_moods'][:3])
+                audio['----:com.apple.iTunes:MOOD'] = [
+                    mutagen.mp4.MP4FreeForm(mood_str.encode('utf-8'), dataformat=mutagen.mp4.AtomDataType.UTF8)
                 ]
-                tags_written.append(f"ESSENTIA_MOOD={mood_conf_str}")
+                tags_written.append(f"MOOD={mood_str}")
+
+                if self.config.write_confidence_tags and results.get('moods'):
+                    mood_details = [f"{m['label']}: {m['confidence']:.2%}" for m in results['moods'][:3]]
+                    mood_conf_str = ', '.join(mood_details)
+                    audio['----:com.apple.iTunes:ESSENTIA_MOOD'] = [
+                        mutagen.mp4.MP4FreeForm(mood_conf_str.encode('utf-8'), dataformat=mutagen.mp4.AtomDataType.UTF8)
+                    ]
+                    tags_written.append(f"ESSENTIA_MOOD={mood_conf_str}")
         
         if tags_written:
             audio.save()
@@ -646,15 +711,39 @@ class TagWriter:
                 self.logger.log("     ⏭️  Skipping genres (already has genre tag)")
         
         if self.config.enable_moods and results.get('formatted_moods'):
-            mood_str = '; '.join(results['formatted_moods'][:3])
-            audio['WM/Mood'] = mood_str
-            tags_written.append(f"WM/Mood={mood_str}")
-            
-            if self.config.write_confidence_tags and results.get('moods'):
-                mood_details = [f"{m['label']}: {m['confidence']:.2%}" for m in results['moods'][:3]]
-                mood_conf_str = ', '.join(mood_details)
-                audio['ESSENTIA_MOOD'] = f"Essentia: {mood_conf_str}"
-                tags_written.append(f"ESSENTIA_MOOD={mood_conf_str}")
+            if self.config.rb_write:
+                # Rekordbox-compatible path: merge a [MOOD: ...] marker
+                # into the WM/Comments field. Coexists with Mixed In Key.
+                top_moods = results['formatted_moods'][:3]
+                if (self.config.write_confidence_tags
+                        and results.get('moods')):
+                    confidences = [
+                        m['confidence'] for m in results['moods'][:3]
+                    ]
+                    mood_marker = build_mood_marker(top_moods, confidences)
+                else:
+                    mood_marker = build_mood_marker(top_moods)
+
+                existing_text = ''
+                if 'WM/Comments' in audio:
+                    val = audio['WM/Comments']
+                    if val:
+                        existing_text = str(val[0])
+                new_text = merge_mood_into_comment(
+                    existing_text, mood_marker
+                )
+                audio['WM/Comments'] = new_text
+                tags_written.append(f"WM/Comments={new_text}")
+            else:
+                mood_str = '; '.join(results['formatted_moods'][:3])
+                audio['WM/Mood'] = mood_str
+                tags_written.append(f"WM/Mood={mood_str}")
+
+                if self.config.write_confidence_tags and results.get('moods'):
+                    mood_details = [f"{m['label']}: {m['confidence']:.2%}" for m in results['moods'][:3]]
+                    mood_conf_str = ', '.join(mood_details)
+                    audio['ESSENTIA_MOOD'] = f"Essentia: {mood_conf_str}"
+                    tags_written.append(f"ESSENTIA_MOOD={mood_conf_str}")
         
         if tags_written:
             audio.save()
@@ -679,6 +768,65 @@ class TagWriter:
         self._write_id3_tags(audio.tags, results)
         audio.save()
     
+    def _write_wav(self, filepath, results):
+        """Write genre/mood to a WAV file via RIFF INFO chunks (Rekordbox-visible).
+
+        Rekordbox reads RIFF INFO, not ID3, from WAV files.  Genre goes to
+        IGNR; the rb_write mood marker goes to ICMT (merged with any existing
+        comment).  For non-rb_write mode the existing ID3-in-WAV path is also
+        called so that foobar2000 / Mp3tag users still see mood data.
+        """
+        try:
+            existing_info = read_riff_info(filepath)
+        except ValueError as exc:
+            self.logger.log(f"     ⚠️  RIFF INFO read error: {exc}")
+            return
+
+        riff_updates = {}
+        tags_written = []
+
+        if self.config.enable_genres and results.get('formatted_genres'):
+            has_existing = bool(existing_info.get(b'IGNR', '').strip())
+            if self.config.overwrite_existing or not has_existing:
+                genre_str = '; '.join(results['formatted_genres'])
+                riff_updates[b'IGNR'] = genre_str
+                tags_written.append(f'IGNR={genre_str}')
+            else:
+                self.logger.log("     ⏭️  Skipping genres (already has IGNR tag)")
+
+        if self.config.enable_moods and results.get('formatted_moods'):
+            if self.config.rb_write:
+                top_moods = results['formatted_moods'][:3]
+                if (self.config.write_confidence_tags
+                        and results.get('moods')):
+                    confidences = [
+                        m['confidence'] for m in results['moods'][:3]
+                    ]
+                    mood_marker = build_mood_marker(top_moods, confidences)
+                else:
+                    mood_marker = build_mood_marker(top_moods)
+
+                existing_icmt = existing_info.get(b'ICMT', '')
+                new_icmt = merge_mood_into_comment(existing_icmt, mood_marker)
+                riff_updates[b'ICMT'] = new_icmt
+                tags_written.append(f'ICMT={new_icmt}')
+
+        if riff_updates:
+            try:
+                update_riff_info(filepath, riff_updates)
+            except Exception as exc:
+                self.logger.log(f"     ⚠️  RIFF INFO write failed: {exc}")
+                return
+            self.logger.log(
+                f"     ✅ Written RIFF INFO: {', '.join(tags_written)}",
+                console=False,
+            )
+
+        # For non-rb_write mode also write ID3 tags inside the WAV container
+        # so non-Rekordbox players (foobar2000, Mp3tag) can read mood/genre.
+        if not self.config.rb_write:
+            self._write_id3_generic(filepath, results)
+
     def _write_id3_tags(self, tags, results):
         """Shared ID3v2 tag writer used by MP3, AIFF, WAV, DSF"""
         tags_written = []
@@ -694,7 +842,12 @@ class TagWriter:
                 if self.config.write_confidence_tags and results.get('genres'):
                     genre_details = [f"{g['label']}: {g['confidence']:.2%}" for g in results['genres']]
                     confidence_str = ', '.join(genre_details)
-                    tags.delall('COMM::eng')
+                    # Delete only any prior 'Essentia Genre' confidence frame.
+                    # The previous key 'COMM::eng' targeted the *empty-desc*
+                    # English COMM, i.e. the user's main Comments field,
+                    # which would be wiped on every run. The correct hash key
+                    # for a description-tagged frame is 'COMM:<desc>:<lang>'.
+                    tags.delall('COMM:Essentia Genre:eng')
                     tags.add(COMM(
                         encoding=3,
                         lang='eng',
@@ -706,14 +859,52 @@ class TagWriter:
                 self.logger.log("     ⏭️  Skipping genres (already has GENRE tag)")
         
         if self.config.enable_moods and results.get('formatted_moods'):
-            mood_str = '; '.join(results['formatted_moods'][:3])
-            tags.add(COMM(
-                encoding=3,
-                lang='eng',
-                desc='Essentia Mood',
-                text=mood_str
-            ))
-            tags_written.append(f"COMM(mood)={mood_str}")
+            if self.config.rb_write:
+                # Rekordbox-compatible path: append a [MOOD: ...] marker to
+                # the standard (empty-description) Comments field. We read
+                # the current comment text first, run it through the merge
+                # function (which strips any prior marker and appends the
+                # new one), then write it back. This preserves Mixed In Key
+                # output and any user comments while keeping mood data
+                # visible in Rekordbox.
+                top_moods = results['formatted_moods'][:3]
+                if (self.config.write_confidence_tags
+                        and results.get('moods')):
+                    confidences = [
+                        m['confidence'] for m in results['moods'][:3]
+                    ]
+                    mood_marker = build_mood_marker(top_moods, confidences)
+                else:
+                    mood_marker = build_mood_marker(top_moods)
+
+                existing_comm = tags.get('COMM::eng')
+                existing_text = ''
+                if existing_comm is not None and existing_comm.text:
+                    existing_text = existing_comm.text[0]
+
+                new_text = merge_mood_into_comment(
+                    existing_text, mood_marker
+                )
+                tags.delall('COMM::eng')
+                tags.add(COMM(
+                    encoding=3,
+                    lang='eng',
+                    desc='',
+                    text=new_text,
+                ))
+                tags_written.append(f"COMM={new_text}")
+            else:
+                # Original behaviour: write to a custom-description COMM
+                # frame. Not visible in Rekordbox but preserved for
+                # Mp3tag / foobar2000 / etc.
+                mood_str = '; '.join(results['formatted_moods'][:3])
+                tags.add(COMM(
+                    encoding=3,
+                    lang='eng',
+                    desc='Essentia Mood',
+                    text=mood_str
+                ))
+                tags_written.append(f"COMM(mood)={mood_str}")
         
         if tags_written:
             self.logger.log(f"     ✅ Written tags: {', '.join(tags_written)}", console=False)
@@ -749,26 +940,57 @@ class TagWriter:
                 self.logger.log("     ⏭️  Skipping genres (already has Genre tag)")
         
         if self.config.enable_moods and results.get('formatted_moods'):
-            mood_str = '; '.join(results['formatted_moods'][:3])
-            audio.tags['Mood'] = mood_str
-            tags_written.append(f"Mood={mood_str}")
-            
-            if self.config.write_confidence_tags and results.get('moods'):
-                mood_details = [f"{m['label']}: {m['confidence']:.2%}" for m in results['moods'][:3]]
-                mood_conf_str = ', '.join(mood_details)
-                audio.tags['Essentia Mood'] = f"Essentia: {mood_conf_str}"
-                tags_written.append(f"Essentia Mood={mood_conf_str}")
+            if self.config.rb_write:
+                # Rekordbox-compatible path: merge a [MOOD: ...] marker
+                # into the standard APEv2 Comment field.
+                top_moods = results['formatted_moods'][:3]
+                if (self.config.write_confidence_tags
+                        and results.get('moods')):
+                    confidences = [
+                        m['confidence'] for m in results['moods'][:3]
+                    ]
+                    mood_marker = build_mood_marker(top_moods, confidences)
+                else:
+                    mood_marker = build_mood_marker(top_moods)
+
+                existing_text = ''
+                if 'Comment' in audio.tags:
+                    val = audio.tags['Comment']
+                    if val:
+                        existing_text = (
+                            val[0] if isinstance(val, list) else str(val)
+                        )
+                new_text = merge_mood_into_comment(
+                    existing_text, mood_marker
+                )
+                audio.tags['Comment'] = new_text
+                tags_written.append(f"Comment={new_text}")
+            else:
+                mood_str = '; '.join(results['formatted_moods'][:3])
+                audio.tags['Mood'] = mood_str
+                tags_written.append(f"Mood={mood_str}")
+
+                if self.config.write_confidence_tags and results.get('moods'):
+                    mood_details = [f"{m['label']}: {m['confidence']:.2%}" for m in results['moods'][:3]]
+                    mood_conf_str = ', '.join(mood_details)
+                    audio.tags['Essentia Mood'] = f"Essentia: {mood_conf_str}"
+                    tags_written.append(f"Essentia Mood={mood_conf_str}")
         
         if tags_written:
             audio.save()
             self.logger.log(f"     ✅ Written tags: {', '.join(tags_written)}", console=False)
 
 
-def has_existing_tags(filepath, enable_genres, enable_moods):
-    """Quick check if file already has genre/mood tags (avoids expensive analysis)."""
+def has_existing_tags(filepath, enable_genres, enable_moods, rb_write=False):
+    """Quick check if file already has genre/mood tags (avoids expensive analysis).
+
+    When rb_write is True, mood detection searches for a [MOOD: ...] marker
+    inside each format's standard comment field instead of looking for the
+    dedicated MOOD / WM/Mood / Essentia Mood tags used in non-rb_write mode.
+    """
     try:
         audio = mutagen.File(filepath)
-        if audio is None or audio.tags is None:
+        if audio is None:
             return False
 
         ext = Path(filepath).suffix.lower()
@@ -776,26 +998,86 @@ def has_existing_tags(filepath, enable_genres, enable_moods):
         has_mood = False
 
         if ext in ('.flac', '.ogg', '.oga', '.opus'):
+            if audio.tags is None:
+                return False
             has_genre = 'GENRE' in audio
-            has_mood = 'MOOD' in audio
-        elif ext in ('.mp3', '.aiff', '.aif', '.wav', '.dsf'):
+            if rb_write:
+                comment_val = (
+                    audio['COMMENT'][0]
+                    if 'COMMENT' in audio and audio['COMMENT']
+                    else ''
+                )
+                has_mood = bool(MOOD_MARKER_RE.search(comment_val))
+            else:
+                has_mood = 'MOOD' in audio
+
+        elif ext == '.wav':
+            try:
+                info = read_riff_info(filepath)
+                has_genre = bool(info.get(b'IGNR', '').strip())
+            except Exception:
+                info = {}
+                has_genre = False
+            # Fall back to ID3 TCON for files tagged before the RIFF INFO writer
+            if not has_genre and audio.tags:
+                has_genre = bool(audio.tags.getall('TCON'))
+            if rb_write:
+                icmt = info.get(b'ICMT', '')
+                has_mood = bool(MOOD_MARKER_RE.search(icmt))
+            else:
+                has_mood = bool(audio.tags and any(
+                    getattr(c, 'desc', '') == 'Essentia Mood'
+                    for c in audio.tags.getall('COMM')
+                ))
+
+        elif ext in ('.mp3', '.aiff', '.aif', '.dsf'):
+            if audio.tags is None:
+                return False
             tags = audio.tags
-            if tags:
-                has_genre = bool(tags.getall('TCON'))
+            has_genre = bool(tags.getall('TCON'))
+            if rb_write:
+                comm = tags.get('COMM::eng')
+                text = comm.text[0] if comm and comm.text else ''
+                has_mood = bool(MOOD_MARKER_RE.search(text))
+            else:
                 has_mood = any(
                     getattr(c, 'desc', '') == 'Essentia Mood'
                     for c in tags.getall('COMM')
                 )
+
         elif ext in ('.m4a', '.m4b', '.mp4', '.aac'):
+            if audio.tags is None:
+                return False
             has_genre = '\xa9gen' in audio
-            has_mood = '----:com.apple.iTunes:MOOD' in audio
+            if rb_write:
+                cmt = audio.tags.get('\xa9cmt')
+                text = str(cmt[0]) if cmt else ''
+                has_mood = bool(MOOD_MARKER_RE.search(text))
+            else:
+                has_mood = '----:com.apple.iTunes:MOOD' in audio
+
         elif ext == '.wma':
+            if audio.tags is None:
+                return False
             has_genre = 'WM/Genre' in audio
-            has_mood = 'WM/Mood' in audio
+            if rb_write:
+                wm_cmt = audio.get('WM/Comments')
+                text = str(wm_cmt[0]) if wm_cmt else ''
+                has_mood = bool(MOOD_MARKER_RE.search(text))
+            else:
+                has_mood = 'WM/Mood' in audio
+
         elif ext in ('.wv', '.ape', '.mpc', '.mp+'):
-            tags = audio.tags or {}
+            if audio.tags is None:
+                return False
+            tags = audio.tags
             has_genre = 'Genre' in tags
-            has_mood = 'Mood' in tags
+            if rb_write:
+                val = tags.get('Comment')
+                comment_val = val[0] if isinstance(val, list) else str(val) if val else ''
+                has_mood = bool(MOOD_MARKER_RE.search(comment_val))
+            else:
+                has_mood = 'Mood' in tags
 
         if enable_genres and enable_moods:
             return has_genre and has_mood
@@ -864,7 +1146,7 @@ def _worker_process_file(args):
     try:
         # Early skip: check existing tags before expensive analysis
         if not config_dict['overwrite_existing'] and not config_dict['dry_run']:
-            if has_existing_tags(filepath, config_dict['enable_genres'], config_dict['enable_moods']):
+            if has_existing_tags(filepath, config_dict['enable_genres'], config_dict['enable_moods'], config_dict['rb_write']):
                 return {'filepath': filepath_str, 'status': 'skipped'}
 
         from essentia.standard import MonoLoader
@@ -1023,7 +1305,7 @@ def _scan_sequential(audio_files, root, analyzer, tag_writer, config, logger):
         
         # Early skip: avoid expensive analysis if tags already exist
         if not config.overwrite_existing and not config.dry_run:
-            if has_existing_tags(filepath, config.enable_genres, config.enable_moods):
+            if has_existing_tags(filepath, config.enable_genres, config.enable_moods, config.rb_write):
                 logger.log(f"[{i}/{total}] ⏭️  {relative_path} (already tagged)")
                 skipped += 1
                 logger.log("")
@@ -1063,6 +1345,7 @@ def _scan_parallel(audio_files, root, tag_writer, config, logger):
         'mood_threshold': config.mood_threshold,
         'genre_format': config.genre_format,
         'overwrite_existing': config.overwrite_existing,
+        'rb_write': config.rb_write,
         'dry_run': config.dry_run,
         'write_confidence_tags': config.write_confidence_tags,
         'verbose': config.verbose,
@@ -1608,6 +1891,22 @@ def configure_settings():
     print("   • Overwrite: Replace existing tags")
     print("   • Skip: Leave files with existing tags untouched")
     config.overwrite_existing = get_yes_no("Overwrite existing tags?", default=False)
+
+    # Rekordbox-compatible writing
+    if config.enable_moods:
+        print("\n" + "─" * 70)
+        print("🎛️  REKORDBOX-COMPATIBLE MOOD WRITING")
+        print("   Rekordbox has no native Mood field, so the standard MOOD")
+        print("   tag is invisible there. With this option enabled, mood is")
+        print("   appended to the file's Comments field as a marker:")
+        print("     [MOOD: Happy; Energetic; Uplifting]")
+        print("   This shows up in Rekordbox's Comments column and coexists")
+        print("   with Mixed In Key's Energy/Key prefix.")
+        print("   Supported on MP3 / AIFF / DSF / WAV / FLAC / OGG / Opus /")
+        print("   MP4 / M4A / WMA / APEv2.")
+        config.rb_write = get_yes_no(
+            "Enable Rekordbox-compatible mood writing?", default=False
+        )
     
     # Verbose output
     print("\n" + "─" * 70)
@@ -1667,6 +1966,7 @@ def display_config_summary(config, music_path):
     print(f"   • Overwrite existing: {config.overwrite_existing}")
     print(f"   • Verbose output: {config.verbose}")
     print(f"   • Parallel workers: {config.workers}")
+    print(f"   • Rekordbox-compatible mood writing: {config.rb_write}")
     if config.max_audio_duration < float('inf'):
         print(f"   • Max audio duration: {int(config.max_audio_duration)}s")
     else:
@@ -1856,7 +2156,18 @@ Genre format styles:
         metavar='SECS',
         help='Max seconds of audio to analyze per track (default: 300, 0 = no limit)'
     )
-    
+
+    parser.add_argument(
+        '--rb-write',
+        action='store_true',
+        help=(
+            'Rekordbox-compatible mood writing: append mood as a '
+            '[MOOD: ...] marker inside the standard Comments field so it is '
+            'visible in Rekordbox. Coexists with Mixed In Key output. '
+            'Supports MP3/AIFF/DSF/WAV/FLAC/OGG/Opus/MP4/M4A/WMA/APEv2.'
+        )
+    )
+
     return parser.parse_args()
 
 
@@ -1880,6 +2191,7 @@ def config_from_args(args):
     config.genre_format = args.genre_format
     config.workers = args.workers if args.workers > 0 else max(1, (os.cpu_count() or 2) // 2)
     config.max_audio_duration = args.max_duration if args.max_duration > 0 else float('inf')
+    config.rb_write = args.rb_write
     
     # Handle library path
     if args.library:
