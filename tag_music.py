@@ -17,7 +17,7 @@ import numpy as np
 # processes so that TF thread settings can be configured before initialization.
 import mutagen
 from mutagen.flac import FLAC
-from mutagen.id3 import ID3, TCON, COMM
+from mutagen.id3 import ID3, TCON, COMM, TMOO
 from mutagen.oggvorbis import OggVorbis
 from mutagen.oggopus import OggOpus
 from mutagen.mp4 import MP4
@@ -707,13 +707,21 @@ class TagWriter:
         
         if self.config.enable_moods and results.get('formatted_moods'):
             mood_str = '; '.join(results['formatted_moods'][:3])
-            tags.add(COMM(
+            tags.add(TMOO(
                 encoding=3,
-                lang='eng',
-                desc='Essentia Mood',
                 text=mood_str
             ))
-            tags_written.append(f"COMM(mood)={mood_str}")
+            tags_written.append(f"TMOO={mood_str}")
+            if self.config.write_confidence_tags and results.get('moods'):
+                mood_details = [f"{m['label']}: {m['confidence']:.2%}" for m in results['moods'][:3]]
+                mood_conf_str = ', '.join(mood_details)
+                tags.add(COMM(
+                    encoding=3,
+                    lang='eng',
+                    desc='Essentia Mood',
+                    text=mood_str
+                ))
+                tags_written.append(f"COMM(mood)={mood_conf_str}")
         
         if tags_written:
             self.logger.log(f"     ✅ Written tags: {', '.join(tags_written)}", console=False)

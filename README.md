@@ -362,6 +362,7 @@ Tags are written using the native tagging format for each container:
 **MP3 / AIFF / WAV / DSF** (ID3v2):
 
 - `TCON` (Genre) - Formatted genre tags
+- `TMOO` (Mood) - Formatted mood tags (semicolon-separated)
 - `COMM` (Comment) - Confidence scores (optional)
 
 **M4A / MP4 / AAC** (iTunes atoms):
