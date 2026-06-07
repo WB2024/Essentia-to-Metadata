@@ -81,7 +81,7 @@ source venv/bin/activate
 # 3. Install dependencies
 pip install essentia-tensorflow mutagen numpy
 
-# 4. Download ML models (~87MB)
+# 4. Download ML models (~87MB) (Only required for a native run)
 bash download_models.sh
 ```
 
@@ -106,6 +106,9 @@ You'll be prompted for:
 ## 🐳 Docker
 
 ### CPU mode
+
+If you plan to build the image multiple times, like for development, you can run `bash download_models.sh` 
+to pre-download the models. The docker build will pick them from there, instead of downloading them again.
 
 ```bash
 # Build the image
@@ -162,22 +165,22 @@ python tag_music.py /path/to/music --auto --dry-run
 
 ### CLI Arguments Reference
 
-| Argument | Short | Description | Default |
-|----------|-------|-------------|---------|
-| `--auto` | `-a` | Non-interactive mode | - |
-| `--single-file` | `-f` | Process single file | - |
-| `--genres N` | `-g` | Number of genres | 3 |
-| `--genre-threshold PCT` | `-gt` | Genre confidence % | 15 |
-| `--genre-format STYLE` | `-gf` | Format style | parent_child |
-| `--no-genres` | - | Disable genre analysis | - |
-| `--no-moods` | - | Disable mood analysis | - |
-| `--mood-threshold PCT` | `-mt` | Mood confidence % | 0.5 |
-| `--dry-run` | `-d` | Don't write tags | - |
-| `--overwrite` | `-o` | Overwrite existing tags | - |
-| `--quiet` | `-q` | Minimal output | - |
-| `--log-dir DIR` | - | Log file directory | ./ |
-| `--model-dir DIR` | - | Essentia models directory | ~/essentia_models |
-| `--library DIR` | - | Set & save default library path | - |
+| Argument                | Short | Description                                                                 | Default           |
+|-------------------------|-------|-----------------------------------------------------------------------------|-------------------|
+| `--auto`                | `-a`  | Non-interactive mode                                                        | -                 |
+| `--single-file`         | `-f`  | Process single file                                                         | -                 |
+| `--genres N`            | `-g`  | Number of genres                                                            | 3                 |
+| `--genre-threshold PCT` | `-gt` | Genre confidence %                                                          | 15                |
+| `--genre-format STYLE`  | `-gf` | Format style (`parent_child`, `child_parent`, `child_only`, `raw`, `split`) | parent_child      |
+| `--no-genres`           | -     | Disable genre analysis                                                      | -                 |
+| `--no-moods`            | -     | Disable mood analysis                                                       | -                 |
+| `--mood-threshold PCT`  | `-mt` | Mood confidence %                                                           | 0.5               |
+| `--dry-run`             | `-d`  | Don't write tags                                                            | -                 |
+| `--overwrite`           | `-o`  | Overwrite existing tags                                                     | -                 |
+| `--quiet`               | `-q`  | Minimal output                                                              | -                 |
+| `--log-dir DIR`         | -     | Log file directory                                                          | ./                |
+| `--model-dir DIR`       | -     | Essentia models directory                                                   | ~/essentia_models |
+| `--library DIR`         | -     | Set & save default library path                                             | -                 |
 
 > **Note:** `--no-genres` and `--no-moods` cannot be used together — at least one analysis type must be enabled.
 
@@ -213,11 +216,11 @@ The first setting lets you define (or update) a **default music library root pat
 
 Once set, every subsequent run begins with a path selection menu:
 
-| Option | Description |
-|--------|-------------|
-| **1. Scan entire library** (default) | Recursively scan from the library root |
-| **2. Browse & select a folder** | Open the interactive folder browser to pick a sub-folder |
-| **3. Enter a custom path** | Type a path manually (original behaviour) |
+| Option                               | Description                                              |
+|--------------------------------------|----------------------------------------------------------|
+| **1. Scan entire library** (default) | Recursively scan from the library root                   |
+| **2. Browse & select a folder**      | Open the interactive folder browser to pick a sub-folder |
+| **3. Enter a custom path**           | Type a path manually (original behaviour)                |
 
 #### Interactive Folder Browser
 
@@ -235,22 +238,22 @@ Option 2 opens a full-screen CLI folder navigator:
      📁 [1996] The Don Killuminati
 ```
 
-| Key | Action |
-|-----|--------|
-| ↑ / ↓ | Move selection up/down |
-| Enter | Select folder or navigate into it |
-| Backspace | Go up one directory |
-| q | Cancel and return to path selection |
+| Key       | Action                              |
+|-----------|-------------------------------------|
+| ↑ / ↓     | Move selection up/down              |
+| Enter     | Select folder or navigate into it   |
+| Backspace | Go up one directory                 |
+| q         | Cancel and return to path selection |
 
 #### Analysis Mode
 
 Choose what to analyse for each run:
 
-| Option | Description |
-|--------|-------------|
-| **1. Both** (default) | Analyse and write both genre and mood tags |
-| **2. Genres only** | Run only the genre model; skip mood analysis entirely |
-| **3. Moods only** | Run only the mood model; skip genre analysis entirely |
+| Option                | Description                                           |
+|-----------------------|-------------------------------------------------------|
+| **1. Both** (default) | Analyse and write both genre and mood tags            |
+| **2. Genres only**    | Run only the genre model; skip mood analysis entirely |
+| **3. Moods only**     | Run only the mood model; skip genre analysis entirely |
 
 Only the models that are needed are loaded, saving memory and time when running in a single-mode.
 
@@ -259,10 +262,11 @@ Only the models that are needed are loaded, saving memory and time when running 
 - **Number of genres** (1-10) - How many genre tags per song
 - **Confidence threshold** (1-50%) - Minimum prediction confidence
 - **Format style**:
-  - `Rock - Alternative Rock` (parent - child) ← default
-  - `Alternative Rock - Rock` (child - parent)
-  - `Alternative Rock` (child only)
-  - `Rock---Alternative Rock` (raw)
+    - `Rock - Alternative Rock` (parent - child) ← default
+    - `Alternative Rock - Rock` (child - parent)
+    - `Alternative Rock` (child only)
+    - `Rock---Alternative Rock` (raw)
+    - `Rock` + `Alternative Rock` (split) formats parent and child as separate genres, deduplicated
 
 #### Mood Settings *(shown when mode is Both or Moods only)*
 
@@ -338,11 +342,11 @@ Understanding confidence scores:
 
 ### Tag Formatting Examples
 
-| Raw Prediction            | parent_child              | child_parent              | child_only         |
-| ------------------------- | ------------------------- | ------------------------- | ------------------ |
-| `Rock---Alternative Rock` | `Rock - Alternative Rock` | `Alternative Rock - Rock` | `Alternative Rock` |
-| `Hip-Hop---Gangsta`       | `Hip-Hop - Gangsta`       | `Gangsta - Hip-Hop`       | `Gangsta`          |
-| `Electronic---Techno`     | `Electronic - Techno`     | `Techno - Electronic`     | `Techno`           |
+| Raw Prediction            | parent_child              | child_parent              | child_only         | split                       |
+|---------------------------|---------------------------|---------------------------|--------------------|-----------------------------|
+| `Rock---Alternative Rock` | `Rock - Alternative Rock` | `Alternative Rock - Rock` | `Alternative Rock` | `Rock` + `Alternative Rock` |
+| `Hip-Hop---Gangsta`       | `Hip-Hop - Gangsta`       | `Gangsta - Hip-Hop`       | `Gangsta`          | `Hip-Hop` + `Gangsta`       |
+| `Electronic---Techno`     | `Electronic - Techno`     | `Techno - Electronic`     | `Techno`           | `Electronic` + `Techno`     |
 
 ---
 

@@ -102,6 +102,43 @@ def format_genre_tag(raw_genre, style='parent_child'):
     return raw_genre
 
 
+def build_genre_list(raw_genres, style):
+    """
+    Build a deduplicated list of formatted genre strings.
+
+    For 'split' style: splits each 'Parent---Child' label into separate parent
+    and child entries, preserving insertion order with no duplicates.
+    For all other styles: calls format_genre_tag per label and deduplicates.
+
+    Args:
+        raw_genres: List of dicts with 'label' key (from genre prediction)
+        style: Genre format style (see format_genre_tag, plus 'split')
+
+    Returns:
+        List of unique genre strings
+    """
+    seen = []
+    if style == 'split':
+        for g in raw_genres:
+            label = g['label']
+            if '---' in label:
+                parts = label.split('---')
+                parent = parts[0].strip()
+                child = parts[1].strip() if len(parts) > 1 else ''
+                for value in ((parent, child) if child else (parent,)):
+                    if value not in seen:
+                        seen.append(value)
+            else:
+                if label not in seen:
+                    seen.append(label)
+    else:
+        for g in raw_genres:
+            formatted = format_genre_tag(g['label'], style=style)
+            if formatted not in seen:
+                seen.append(formatted)
+    return seen
+
+
 def format_mood_tag(raw_mood):
     """
     Format mood tags for better readability
@@ -417,10 +454,7 @@ class EssentiaAnalyzer:
                 results['genres'] = genres
                 
                 # Format genres for tag writing
-                results['formatted_genres'] = [
-                    format_genre_tag(g['label'], style=self.config.genre_format) 
-                    for g in genres
-                ]
+                results['formatted_genres'] = build_genre_list(genres, self.config.genre_format)
                 
                 # Store all genre activations for logging
                 all_top_indices = np.argsort(genre_activations)[::-1][:10]
@@ -542,9 +576,8 @@ class TagWriter:
         
         if self.config.enable_genres and results.get('formatted_genres'):
             if self.config.overwrite_existing or 'GENRE' not in audio:
-                genre_str = '; '.join(results['formatted_genres'])
-                audio['GENRE'] = genre_str
-                tags_written.append(f"GENRE={genre_str}")
+                audio['GENRE'] = results['formatted_genres']
+                tags_written.append(f"GENRE={'; '.join(results['formatted_genres'])}")
                 
                 if self.config.write_confidence_tags and results.get('genres'):
                     genre_details = [f"{g['label']}: {g['confidence']:.2%}" for g in results['genres']]
@@ -594,9 +627,8 @@ class TagWriter:
         if self.config.enable_genres and results.get('formatted_genres'):
             has_existing = '\xa9gen' in audio.tags if audio.tags else False
             if self.config.overwrite_existing or not has_existing:
-                genre_str = '; '.join(results['formatted_genres'])
-                audio['\xa9gen'] = [genre_str]
-                tags_written.append(f"genre={genre_str}")
+                audio['\xa9gen'] = results['formatted_genres']
+                tags_written.append(f"genre={'; '.join(results['formatted_genres'])}")
                 
                 if self.config.write_confidence_tags and results.get('genres'):
                     genre_details = [f"{g['label']}: {g['confidence']:.2%}" for g in results['genres']]
@@ -633,9 +665,8 @@ class TagWriter:
         if self.config.enable_genres and results.get('formatted_genres'):
             has_existing = 'WM/Genre' in audio if audio.tags else False
             if self.config.overwrite_existing or not has_existing:
-                genre_str = '; '.join(results['formatted_genres'])
-                audio['WM/Genre'] = genre_str
-                tags_written.append(f"WM/Genre={genre_str}")
+                audio['WM/Genre'] = results['formatted_genres']
+                tags_written.append(f"WM/Genre={'; '.join(results['formatted_genres'])}")
                 
                 if self.config.write_confidence_tags and results.get('genres'):
                     genre_details = [f"{g['label']}: {g['confidence']:.2%}" for g in results['genres']]
@@ -686,10 +717,9 @@ class TagWriter:
         if self.config.enable_genres and results.get('formatted_genres'):
             has_existing_genre = bool(tags.getall('TCON'))
             if self.config.overwrite_existing or not has_existing_genre:
-                genre_str = '; '.join(results['formatted_genres'])
                 tags.delall('TCON')
-                tags.add(TCON(encoding=3, text=genre_str))
-                tags_written.append(f"TCON={genre_str}")
+                tags.add(TCON(encoding=3, text=results['formatted_genres']))
+                tags_written.append(f"TCON={'; '.join(results['formatted_genres'])}")
                 
                 if self.config.write_confidence_tags and results.get('genres'):
                     genre_details = [f"{g['label']}: {g['confidence']:.2%}" for g in results['genres']]
@@ -736,9 +766,8 @@ class TagWriter:
         if self.config.enable_genres and results.get('formatted_genres'):
             has_existing = 'Genre' in audio.tags
             if self.config.overwrite_existing or not has_existing:
-                genre_str = '; '.join(results['formatted_genres'])
-                audio.tags['Genre'] = genre_str
-                tags_written.append(f"Genre={genre_str}")
+                audio.tags['Genre'] = results['formatted_genres']
+                tags_written.append(f"Genre={'; '.join(results['formatted_genres'])}")
                 
                 if self.config.write_confidence_tags and results.get('genres'):
                     genre_details = [f"{g['label']}: {g['confidence']:.2%}" for g in results['genres']]
@@ -915,9 +944,7 @@ def _worker_process_file(args):
                 })
 
             results['genres'] = genres
-            results['formatted_genres'] = [
-                format_genre_tag(g['label'], style=genre_format) for g in genres
-            ]
+            results['formatted_genres'] = build_genre_list(genres, genre_format)
             all_top = np.argsort(genre_activations)[::-1][:10]
             results['all_genres_debug'] = [
                 (genre_labels[idx], float(genre_activations[idx])) for idx in all_top
@@ -1571,12 +1598,14 @@ def configure_settings():
         print("   • 2 = 'Alternative Rock - Rock' (child - parent)")
         print("   • 3 = 'Alternative Rock' (child only)")
         print("   • 4 = 'Rock---Alternative Rock' (raw/no formatting)")
-        format_choice = get_int_input("Genre format", default=1, min_val=1, max_val=4)
+        print("   • 5 = parent + child as separate multi-value tags (split)")
+        format_choice = get_int_input("Genre format", default=1, min_val=1, max_val=5)
         format_map = {
             1: 'parent_child',
             2: 'child_parent',
             3: 'child_only',
-            4: 'raw'
+            4: 'raw',
+            5: 'split'
         }
         config.genre_format = format_map[format_choice]
     
@@ -1766,9 +1795,9 @@ Genre format styles:
     
     parser.add_argument(
         '--genre-format', '-gf',
-        choices=['parent_child', 'child_parent', 'child_only', 'raw'],
+        choices=['parent_child', 'child_parent', 'child_only', 'raw', 'split'],
         default='parent_child',
-        help='Genre tag format style (default: parent_child)'
+        help='Genre tag format style (default: parent_child). split writes parent and child as separate multi-value tags, deduplicated'
     )
     
     # Analysis mode settings

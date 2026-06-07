@@ -4,7 +4,7 @@
 
 set -e
 
-MODEL_DIR="${HOME}/essentia_models"
+MODEL_DIR="$(cd "$(dirname "$0")" && pwd)/essentia_models"
 
 echo "🎵 Essentia Model Downloader"
 echo "================================"
@@ -19,17 +19,17 @@ cd "${MODEL_DIR}"
 
 # Download embedding model (required)
 echo "📦 Downloading embedding model..."
-wget -q --show-progress https://essentia.upf.edu/models/music-style-classification/discogs-effnet/discogs-effnet-bs64-1.pb
+wget -nc -q --show-progress https://essentia.upf.edu/models/music-style-classification/discogs-effnet/discogs-effnet-bs64-1.pb
 
 # Download genre classifier
 echo "📦 Downloading genre classifier (Discogs 400)..."
-wget -q --show-progress https://essentia.upf.edu/models/classification-heads/genre_discogs400/genre_discogs400-discogs-effnet-1.pb
-wget -q --show-progress https://essentia.upf.edu/models/classification-heads/genre_discogs400/genre_discogs400-discogs-effnet-1.json
+wget -nc -q --show-progress https://essentia.upf.edu/models/classification-heads/genre_discogs400/genre_discogs400-discogs-effnet-1.pb
+wget -nc -q --show-progress https://essentia.upf.edu/models/classification-heads/genre_discogs400/genre_discogs400-discogs-effnet-1.json
 
 # Download mood classifier
 echo "📦 Downloading mood classifier..."
-wget -q --show-progress https://essentia.upf.edu/models/classification-heads/mtg_jamendo_moodtheme/mtg_jamendo_moodtheme-discogs-effnet-1.pb
-wget -q --show-progress https://essentia.upf.edu/models/classification-heads/mtg_jamendo_moodtheme/mtg_jamendo_moodtheme-discogs-effnet-1.json
+wget -nc -q --show-progress https://essentia.upf.edu/models/classification-heads/mtg_jamendo_moodtheme/mtg_jamendo_moodtheme-discogs-effnet-1.pb
+wget -nc -q --show-progress https://essentia.upf.edu/models/classification-heads/mtg_jamendo_moodtheme/mtg_jamendo_moodtheme-discogs-effnet-1.json
 
 echo ""
 echo "✅ Download complete!"
