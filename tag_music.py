@@ -293,6 +293,8 @@ class Config:
         self.dry_run = True
         self.enable_genres = True
         self.enable_moods = True
+        self.enable_key = True
+        self.enable_bpm = True
         self.top_n_genres = 3
         self.genre_threshold = 0.15
         self.mood_threshold = 0.005
@@ -467,6 +469,35 @@ class EssentiaAnalyzer:
                 
                 self.logger.log(f"     [MOOD DEBUG] Found {len(moods)} moods above threshold", console=False)
             
+            # ── Key & BPM detection ──────────────────────────────────────────
+            # Uses 44100 Hz audio (key/BPM need full frequency resolution).
+            # PercivalBpmEstimator is ~10x faster than RhythmExtractor2013 and
+            # returns the same BPM value for traditional music.
+            if self.config.enable_key or self.config.enable_bpm:
+                try:
+                    from essentia.standard import KeyExtractor, PercivalBpmEstimator
+                    audio_hq = MonoLoader(
+                        filename=str(filepath),
+                        sampleRate=44100,
+                    )()
+                    # Honour the same duration cap as ML analysis
+                    max_hq = int(self.config.max_audio_duration * 44100)
+                    if len(audio_hq) > max_hq:
+                        audio_hq = audio_hq[:max_hq]
+
+                    if self.config.enable_key:
+                        key_ext = KeyExtractor()
+                        key_name, key_scale, key_strength = key_ext(audio_hq)
+                        results['key'] = f"{key_name} {key_scale}"
+                        results['key_name'] = key_name
+                        results['key_scale'] = key_scale
+                        results['key_strength'] = float(key_strength)
+
+                    if self.config.enable_bpm:
+                        results['bpm'] = round(PercivalBpmEstimator()(audio_hq))
+                except Exception as e:
+                    self.logger.log(f"     [KEY/BPM] Detection failed: {e}", console=False)
+
             return results
             
         except Exception as e:
@@ -489,6 +520,10 @@ class TagWriter:
                 tag_info.append(f"Genres: {', '.join(results['formatted_genres'])}")
             if self.config.enable_moods and results.get('formatted_moods'):
                 tag_info.append(f"Moods: {', '.join(results['formatted_moods'][:3])}")
+            if self.config.enable_key and results.get('key'):
+                tag_info.append(f"Key: {results['key']}")
+            if self.config.enable_bpm and results.get('bpm') is not None:
+                tag_info.append(f"BPM: {results['bpm']}")
             self.logger.log(f"     [DRY RUN] Would write: {' | '.join(tag_info)}")
             return
         
@@ -568,6 +603,19 @@ class TagWriter:
             else:
                 self.logger.log("     ⏭️  Skipping moods (already has MOOD tag)")
         
+        # Key tag (Vorbis: INITIALKEY)
+        if self.config.enable_key and results.get('key'):
+            if self.config.overwrite_existing or 'INITIALKEY' not in audio:
+                audio['INITIALKEY'] = results['key']
+                tags_written.append(f"INITIALKEY={results['key']}")
+        
+        # BPM tag (Vorbis: BPM)
+        if self.config.enable_bpm and results.get('bpm') is not None:
+            bpm_str = str(results['bpm'])
+            if self.config.overwrite_existing or 'BPM' not in audio:
+                audio['BPM'] = bpm_str
+                tags_written.append(f"BPM={bpm_str}")
+        
         return tags_written
     
     def _write_ogg(self, filepath, results):
@@ -621,6 +669,19 @@ class TagWriter:
                 ]
                 tags_written.append(f"ESSENTIA_MOOD={mood_conf_str}")
         
+        # Key (MP4: ----:com.apple.iTunes:initialkey)
+        if self.config.enable_key and results.get('key'):
+            audio['----:com.apple.iTunes:initialkey'] = [
+                mutagen.mp4.MP4FreeForm(results['key'].encode('utf-8'),
+                                         dataformat=mutagen.mp4.AtomDataType.UTF8)
+            ]
+            tags_written.append(f"initialkey={results['key']}")
+        
+        # BPM (MP4: tmpo atom)
+        if self.config.enable_bpm and results.get('bpm') is not None:
+            audio['tmpo'] = [results['bpm']]
+            tags_written.append(f"BPM={results['bpm']}")
+        
         if tags_written:
             audio.save()
             self.logger.log(f"     ✅ Written tags: {', '.join(tags_written)}", console=False)
@@ -655,6 +716,16 @@ class TagWriter:
                 mood_conf_str = ', '.join(mood_details)
                 audio['ESSENTIA_MOOD'] = f"Essentia: {mood_conf_str}"
                 tags_written.append(f"ESSENTIA_MOOD={mood_conf_str}")
+        
+        # Key (WMA: WM/InitialKey)
+        if self.config.enable_key and results.get('key'):
+            audio['WM/InitialKey'] = results['key']
+            tags_written.append(f"WM/InitialKey={results['key']}")
+        
+        # BPM (WMA: WM/BeatsPerMinute)
+        if self.config.enable_bpm and results.get('bpm') is not None:
+            audio['WM/BeatsPerMinute'] = str(results['bpm'])
+            tags_written.append(f"WM/BeatsPerMinute={results['bpm']}")
         
         if tags_written:
             audio.save()
@@ -715,6 +786,20 @@ class TagWriter:
             ))
             tags_written.append(f"COMM(mood)={mood_str}")
         
+        # Key tag (ID3v2: TKEY)
+        if self.config.enable_key and results.get('key'):
+            from mutagen.id3 import TKEY as TKEY_Frame
+            tags.delall('TKEY')
+            tags.add(TKEY_Frame(encoding=3, text=results['key']))
+            tags_written.append(f"TKEY={results['key']}")
+        
+        # BPM tag (ID3v2: TBPM)
+        if self.config.enable_bpm and results.get('bpm') is not None:
+            from mutagen.id3 import TBPM
+            tags.delall('TBPM')
+            tags.add(TBPM(encoding=3, text=str(results['bpm'])))
+            tags_written.append(f"TBPM={results['bpm']}")
+        
         if tags_written:
             self.logger.log(f"     ✅ Written tags: {', '.join(tags_written)}", console=False)
     
@@ -758,6 +843,16 @@ class TagWriter:
                 mood_conf_str = ', '.join(mood_details)
                 audio.tags['Essentia Mood'] = f"Essentia: {mood_conf_str}"
                 tags_written.append(f"Essentia Mood={mood_conf_str}")
+        
+        # Key (APEv2: INITIALKEY)
+        if self.config.enable_key and results.get('key'):
+            audio.tags['INITIALKEY'] = results['key']
+            tags_written.append(f"INITIALKEY={results['key']}")
+        
+        # BPM (APEv2: BPM)
+        if self.config.enable_bpm and results.get('bpm') is not None:
+            audio.tags['BPM'] = str(results['bpm'])
+            tags_written.append(f"BPM={results['bpm']}")
         
         if tags_written:
             audio.save()
@@ -946,6 +1041,28 @@ def _worker_process_file(args):
                 key=lambda x: x[1], reverse=True
             )
 
+        # ── Key & BPM detection (parallel worker) ─────────────────────
+        if config_dict.get('enable_key') or config_dict.get('enable_bpm'):
+            try:
+                from essentia.standard import KeyExtractor, PercivalBpmEstimator, MonoLoader as ML2
+                audio_hq = ML2(filename=filepath_str, sampleRate=44100)()
+                max_hq = int(config_dict.get('max_audio_duration', 300) * 44100)
+                if len(audio_hq) > max_hq:
+                    audio_hq = audio_hq[:max_hq]
+
+                if config_dict.get('enable_key'):
+                    key_ext = KeyExtractor()
+                    key_name, key_scale, key_strength = key_ext(audio_hq)
+                    results['key'] = f"{key_name} {key_scale}"
+                    results['key_name'] = key_name
+                    results['key_scale'] = key_scale
+                    results['key_strength'] = float(key_strength)
+
+                if config_dict.get('enable_bpm'):
+                    results['bpm'] = round(PercivalBpmEstimator()(audio_hq))
+            except Exception:
+                pass  # non-critical; don't fail the whole job
+
         return {'filepath': filepath_str, 'status': 'success', 'results': results}
 
     except Exception as e:
@@ -995,6 +1112,13 @@ def _log_file_results(results, config, logger):
     if config.verbose and results.get('all_genres_debug'):
         top_5 = ', '.join([f"{label} ({conf:.1%})" for label, conf in results['all_genres_debug'][:5]])
         logger.log(f"     📊 Top 5 genres: {top_5}", console=False)
+
+    if config.enable_key and results.get('key'):
+        strength = results.get('key_strength', 0)
+        logger.log(f"     🔑 Key: {results['key']} (strength: {strength:.1%})")
+
+    if config.enable_bpm and results.get('bpm') is not None:
+        logger.log(f"     ⏱️  BPM: {results['bpm']}")
 
 
 def _log_summary(processed, errors, skipped, logger):
@@ -1058,6 +1182,8 @@ def _scan_parallel(audio_files, root, tag_writer, config, logger):
     config_dict = {
         'enable_genres': config.enable_genres,
         'enable_moods': config.enable_moods,
+        'enable_key': config.enable_key,
+        'enable_bpm': config.enable_bpm,
         'top_n_genres': config.top_n_genres,
         'genre_threshold': config.genre_threshold,
         'mood_threshold': config.mood_threshold,
@@ -1661,6 +1787,9 @@ def display_config_summary(config, music_path):
     if config.enable_moods:
         print(f"\n😊 Mood Settings:")
         print(f"   • Confidence threshold: {config.mood_threshold:.2%}")
+    print(f"\n🎶 Audio Analysis:")
+    print(f"   • Key detection: {'On' if config.enable_key else 'Off'}")
+    print(f"   • BPM detection: {'On' if config.enable_bpm else 'Off'}")
     print(f"\n📊 Other Settings:")
     print(f"   • Dry run mode: {config.dry_run}")
     print(f"   • Write confidence tags: {config.write_confidence_tags}")
@@ -1785,6 +1914,18 @@ Genre format styles:
     )
     
     parser.add_argument(
+        '--no-key',
+        action='store_true',
+        help='Disable key detection'
+    )
+    
+    parser.add_argument(
+        '--no-bpm',
+        action='store_true',
+        help='Disable BPM detection'
+    )
+    
+    parser.add_argument(
         '--mood-threshold', '-mt',
         type=float,
         default=0.5,
@@ -1871,6 +2012,8 @@ def config_from_args(args):
     config.dry_run = args.dry_run
     config.enable_genres = not args.no_genres
     config.enable_moods = not args.no_moods
+    config.enable_key = not args.no_key
+    config.enable_bpm = not args.no_bpm
     config.top_n_genres = args.genres
     config.genre_threshold = args.genre_threshold / 100.0
     config.mood_threshold = args.mood_threshold / 100.0
@@ -1986,6 +2129,10 @@ def main():
                 logger.log(f"   Genres: {config.top_n_genres} (threshold: {config.genre_threshold:.1%})")
             if config.enable_moods:
                 logger.log(f"   Moods: enabled (threshold: {config.mood_threshold:.2%})")
+            if config.enable_key:
+                logger.log(f"   Key detection: enabled")
+            if config.enable_bpm:
+                logger.log(f"   BPM detection: enabled")
             if config.workers > 1 and not args.single_file:
                 logger.log(f"   Workers: {config.workers} (parallel)")
             logger.log("")
